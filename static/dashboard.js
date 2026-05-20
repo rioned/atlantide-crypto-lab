@@ -1,14 +1,161 @@
 // ATLANTIDE — Multi-Symbol Dashboard JS
 // Dynamic symbol management, per-symbol capital, 10% risk/trade
+// Market session countdowns + 10-minute browser notifications
 let refreshInterval = null;
 let symOrder = [];
 let allSymbols = [];  // full list from /api/symbols
+let userTzOffset = 0;       // hours from UTC (auto-detected)
+let notifiedSessions = {};  // session_id -> true (prevent re-notify)
+let sessionTimers = {};     // session_id -> setInterval handle
 
 // ─── Init ────────────────────────────────────────────────────────
 async function init() {
+  userTzOffset = -(new Date().getTimezoneOffset() / 60);  // hours from UTC
+  await requestNotificationPermission();
   await loadSymbolList();
   await refresh();
   refreshInterval = setInterval(refresh, 2000);
+}
+
+// ─── Notifications ──────────────────────────────────────────────
+async function requestNotificationPermission() {
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'granted') return;
+  if (Notification.permission === 'denied') return;
+  try {
+    const result = await Notification.requestPermission();
+    console.log('Notification permission:', result);
+  } catch (e) { console.log('Notification not supported'); }
+}
+
+// ─── Market Sessions ───────────────────────────────────────────
+function updateMarketSessions(sessions, utcTime) {
+  const bar = document.getElementById('sessionsBar');
+  if (!sessions || sessions.length === 0) return;
+
+  // Kill old countdown timers
+  for (const id of Object.keys(sessionTimers)) {
+    clearInterval(sessionTimers[id]);
+    delete sessionTimers[id];
+  }
+
+  const now = new Date();
+
+  let html = '';
+  for (const s of sessions) {
+    let countdownSec = s.is_open ? s.time_until_close : s.time_until_open;
+    const display = formatCountdown(Math.max(0, countdownSec));
+    const isAlert = !s.is_open && countdownSec <= 600 && countdownSec > 0;
+
+    let cardClass = '';
+    let countClass = 'IDLE';
+    let badgeClass = 'CLOSED';
+    let badgeText = 'CLOSED';
+
+    if (s.is_open) {
+      cardClass = 'OPEN';
+      countClass = 'OPEN';
+      badgeClass = 'OPEN';
+      badgeText = '● OPEN';
+      // Reset notification flag when session opens
+      notifiedSessions[s.id] = false;
+    } else if (isAlert) {
+      cardClass = 'ALERT';
+      countClass = 'ALERT';
+      badgeClass = 'UPCOMING';
+      badgeText = '⏰ OPENING SOON';
+    } else {
+      countClass = 'IDLE';
+      badgeClass = 'UPCOMING';
+      badgeText = 'UPCOMING';
+    }
+
+    const localLabel = userTzOffset === 0 ? 'UTC' :
+      'UTC' + (userTzOffset >= 0 ? '+' : '') + userTzOffset.toFixed(1);
+
+    html += '<div class="session-card ' + cardClass + '" id="sess-' + s.id + '">';
+    html += '<div class="sess-emoji">' + s.emoji + '</div>';
+    html += '<div class="sess-name">' + s.name + '</div>';
+    html += '<div class="sess-countdown ' + countClass + '" id="cd-' + s.id + '">' + display + '</div>';
+    html += '<div class="sess-times">' + s.open_local + ' – ' + s.close_local +
+      ' <span style="color:#445566;">(' + localLabel + ')</span></div>';
+    html += '<div class="sess-times" style="margin-top:2px;">' + s.open_utc + ' – ' + s.close_utc + '</div>';
+    html += '<span class="sess-badge ' + badgeClass + '">' + badgeText + '</span>';
+    html += '</div>';
+
+    // Fire 10-min notification
+    if (isAlert && !notifiedSessions[s.id]) {
+      notifiedSessions[s.id] = true;
+      showToast(s.name, s.open_local + ' (' + localLabel + ')');
+      sendBrowserNotification(s);
+    }
+
+    // Start 1-second countdown timer for this card
+    startCountdownTimer(s);
+  }
+
+  bar.innerHTML = html;
+}
+
+function startCountdownTimer(session) {
+  let remaining = session.is_open ? session.time_until_close : session.time_until_open;
+  if (remaining <= 0 && !session.is_open) remaining = 86400; // next day
+
+  sessionTimers[session.id] = setInterval(() => {
+    remaining--;
+    if (remaining < 0) {
+      clearInterval(sessionTimers[session.id]);
+      delete sessionTimers[session.id];
+      return;
+    }
+    const el = document.getElementById('cd-' + session.id);
+    if (el) el.textContent = formatCountdown(Math.max(0, remaining));
+  }, 1000);
+}
+
+function formatCountdown(totalSec) {
+  if (totalSec <= 0) return '00:00:00';
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  return String(h).padStart(2, '0') + ':' +
+    String(m).padStart(2, '0') + ':' +
+    String(s).padStart(2, '0');
+}
+
+function showToast(sessionName, openTime) {
+  const container = document.getElementById('toastContainer');
+  const toastId = 'toast-' + Date.now();
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.id = toastId;
+  toast.innerHTML = '<div class="toast-title">🔔 MARKET OPENING</div>' +
+    '<div class="toast-body"><b>' + sessionName + '</b> opens in <10 min at ' + openTime + '</div>' +
+    '<span class="toast-dismiss" onclick="dismissToast(\'' + toastId + '\')">×</span>';
+  container.appendChild(toast);
+
+  // Auto-dismiss after 10 seconds
+  setTimeout(() => dismissToast(toastId), 10000);
+}
+
+function dismissToast(toastId) {
+  const el = document.getElementById(toastId);
+  if (el) { el.style.opacity = '0'; el.style.transition = 'opacity 0.3s';
+    setTimeout(() => el.remove(), 300); }
+}
+
+function sendBrowserNotification(session) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try {
+    const n = new Notification('🔔 ' + session.name + ' Opening Soon', {
+      body: 'Opens in less than 10 minutes at ' + session.open_local +
+        ' (' + session.open_utc + ')',
+      icon: '/static/favicon.ico',
+      tag: 'session-' + session.id,
+      requireInteraction: false,
+    });
+    setTimeout(() => n.close(), 8000);
+  } catch (e) { console.log('Notification error:', e); }
 }
 
 // ─── Load full symbol list for selector ─────────────────────────
@@ -22,10 +169,11 @@ async function loadSymbolList() {
 // ─── Main Refresh ──────────────────────────────────────────────
 async function refresh() {
   try {
-    const resp = await fetch('/api/state');
+    const resp = await fetch('/api/state?tz=' + userTzOffset);
     if (!resp.ok) return;
     const state = await resp.json();
     updateHeader(state);
+    updateMarketSessions(state.market_sessions, state.utc_time);
     updateAccount(state.account);
     updateSelector(state);
     buildSymbolPanels(state);

@@ -123,6 +123,45 @@
     .loading-text { color: #00d4ff; font-size: 13px; letter-spacing: 1px; }
 
     .no-data { text-align: center; color: #556677; padding: 20px; font-size: 11px; }
+
+    /* Market Sessions */
+    .sessions-bar {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px;
+    }
+    .session-card {
+      background: #111620; border: 1px solid #1e2a3a; border-radius: 8px; padding: 12px 14px;
+      text-align: center; transition: border-color 0.4s;
+    }
+    .session-card.OPEN { border-color: #00ff88; box-shadow: 0 0 12px #00ff8833; }
+    .session-card.ALERT { border-color: #ffcc00; box-shadow: 0 0 12px #ffcc0033; animation: alert-glow 1s infinite; }
+    @keyframes alert-glow {
+      0%,100% { box-shadow: 0 0 12px #ffcc0033; } 50% { box-shadow: 0 0 24px #ffcc0066; }
+    }
+    .session-card .sess-emoji { font-size: 20px; margin-bottom: 2px; }
+    .session-card .sess-name { font-size: 10px; color: #667788; letter-spacing: 1px; text-transform: uppercase; }
+    .session-card .sess-countdown { font-size: 20px; font-weight: bold; font-variant-numeric: tabular-nums; margin: 4px 0; }
+    .session-card .sess-countdown.OPEN { color: #00ff88; }
+    .session-card .sess-countdown.ALERT { color: #ffcc00; }
+    .session-card .sess-countdown.IDLE { color: #8899aa; }
+    .session-card .sess-times { font-size: 9px; color: #556677; }
+    .session-card .sess-badge {
+      display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 9px; font-weight: bold; letter-spacing: 1px; margin-top: 4px;
+    }
+    .sess-badge.OPEN { background: #003322; color: #00ff88; }
+    .sess-badge.UPCOMING { background: #1a1500; color: #ffcc00; }
+    .sess-badge.CLOSED { background: #141a24; color: #556677; }
+
+    /* Notification toast */
+    .toast-container { position: fixed; top: 20px; right: 20px; z-index: 1000; display: flex; flex-direction: column; gap: 8px; }
+    .toast {
+      background: #1a1500; border: 1px solid #ffcc00; border-radius: 8px; padding: 14px 18px;
+      min-width: 280px; animation: slideIn 0.3s ease-out; box-shadow: 0 4px 20px rgba(255,204,0,0.2);
+    }
+    @keyframes slideIn { from { transform: translateX(120%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    .toast-title { font-size: 12px; font-weight: bold; color: #ffcc00; letter-spacing: 1px; margin-bottom: 4px; }
+    .toast-body { font-size: 11px; color: #ccddee; }
+    .toast-dismiss { position: absolute; top: 6px; right: 10px; cursor: pointer; color: #667788; font-size: 14px; }
+    .toast-dismiss:hover { color: #ffcc00; }
   </style>
 </head>
 <body>
@@ -164,6 +203,12 @@
     <div class="acct-card"><div class="label">Max DD</div><div class="value red" id="valDD">0.00%</div></div>
     <div class="acct-card"><div class="label">Trades</div><div class="value cyan" id="valTradeCount">0</div></div>
   </div>
+
+  <!-- MARKET SESSIONS -->
+  <div class="sessions-bar" id="sessionsBar"></div>
+
+  <!-- TOAST CONTAINER -->
+  <div class="toast-container" id="toastContainer"></div>
 
   <!-- SYMBOL PANELS -->
   <div class="symbol-grid" id="symbolGrid"></div>
