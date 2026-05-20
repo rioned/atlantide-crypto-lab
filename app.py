@@ -76,6 +76,12 @@ MARKET_SESSIONS = [
         "close_utc_hour": 21, "close_utc_minute": 0,
         "emoji": "🇺🇸",
     },
+    {
+        "id": "australian", "name": "Australian (Sydney)",
+        "open_utc_hour": 0, "open_utc_minute": 0,
+        "close_utc_hour": 6, "close_utc_minute": 0,
+        "emoji": "🇦🇺",
+    },
 ]
 
 def compute_session_data(utc_now, tz_offset_hours):
