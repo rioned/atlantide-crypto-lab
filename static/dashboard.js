@@ -12,6 +12,11 @@ let eventSource = null;
 let lastPrices = {};       // sym → price (for flash detection)
 let lastState = null;      // cached /api/state for fallback
 let stateTimer = null;
+// Chart data lives independently — SSE owns it, never overwritten by poll
+let liveCandles = {};      // sym → { "5m": [...], "15m": [...] }
+let liveManip = {};        // sym → manipulation dict
+let liveSignal = {};       // sym → signal_state dict
+let sseReconnectTimer = null;
 
 // ─── Init ────────────────────────────────────────────────────────
 
@@ -45,7 +50,9 @@ async function init() {
 // ─── SSE Streaming ──────────────────────────────────────────────
 
 function connectSSE() {
-  if (eventSource) eventSource.close();
+  if (sseReconnectTimer) { clearTimeout(sseReconnectTimer); sseReconnectTimer = null; }
+  if (eventSource) { eventSource.close(); eventSource = null; }
+
   eventSource = new EventSource('/api/stream');
 
   eventSource.addEventListener('connected', () => {
@@ -56,25 +63,21 @@ function connectSSE() {
   });
 
   eventSource.addEventListener('ticker', (e) => {
-    const data = JSON.parse(e.data);
-    handleTickerUpdate(data);
+    try { const data = JSON.parse(e.data); handleTickerUpdate(data); } catch (_) {}
   });
 
   eventSource.addEventListener('kline', (e) => {
-    const data = JSON.parse(e.data);
-    handleKlineUpdate(data);
+    try { const data = JSON.parse(e.data); handleKlineUpdate(data); } catch (_) {}
   });
 
-  eventSource.addEventListener('ping', () => {
-    // Keep connection alive — heartbeat received
-  });
+  eventSource.addEventListener('ping', () => { /* heartbeat */ });
 
   eventSource.onerror = () => {
-    console.log('SSE disconnected, reconnecting in 3s...');
+    if (eventSource) { eventSource.close(); eventSource = null; }
     document.getElementById('livePill').textContent = '○ RECONNECTING';
     document.getElementById('livePill').style.background = 'var(--yellow-bg)';
     document.getElementById('livePill').style.color = 'var(--yellow)';
-    setTimeout(connectSSE, 3000);
+    sseReconnectTimer = setTimeout(connectSSE, 3000);
   };
 }
 
@@ -119,16 +122,29 @@ function handleTickerUpdate(data) {
 
 function handleKlineUpdate(data) {
   const sym = data.symbol;
-  // Only redraw chart on closed candles to avoid flicker
-  if (data.is_closed && lastState) {
-    // Update cached candle data
-    const symData = lastState.data[sym];
-    if (symData) {
-      const cList = symData.candles_5m || [];
-      cList.push(data.candle);
-      if (cList.length > 60) cList.shift();
-      drawMiniChart(sym, cList, symData.manipulation, symData.signal_state);
-    }
+  const tf = data.tf;
+  if (!data.is_closed || !tf) return;
+
+  // Initialize live chart state for this symbol if needed
+  if (!liveCandles[sym]) liveCandles[sym] = { "5m": [], "15m": [] };
+  if (!liveCandles[sym][tf]) liveCandles[sym][tf] = [];
+
+  const clist = liveCandles[sym][tf];
+  // Dedup by time — the WS may resend the last closed candle
+  const existingIdx = clist.findIndex(c => c.time === data.candle.time);
+  if (existingIdx >= 0) {
+    clist[existingIdx] = data.candle;  // Update with final OHLCV
+  } else {
+    clist.push(data.candle);
+  }
+  // Sort by time, trim to 60
+  clist.sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+  if (clist.length > 60) clist.splice(0, clist.length - 60);
+  liveCandles[sym][tf] = clist;
+
+  // Redraw 5m chart (primary display)
+  if (tf === '5m' || tf === '15m') {
+    drawMiniChart(sym, liveCandles[sym]['5m'] || [], liveManip[sym], liveSignal[sym] || {});
   }
 }
 
@@ -138,10 +154,36 @@ async function pollState() {
   try {
     const resp = await fetch('/api/state?tz=' + userTzOffset);
     if (!resp.ok) return;
-    lastState = await resp.json();
-    updateSessions(lastState.market_sessions);
-    updateClosedTrades(lastState.closed_trades);
-    updateEventLog(lastState.event_log);
+    const fresh = await resp.json();
+
+    // Merge server signal/manipulation data into live state
+    const syms = fresh.symbols || [];
+    const data = fresh.data || {};
+    let chartChanged = false;
+    for (const sym of syms) {
+      const d = data[sym] || {};
+      liveManip[sym] = d.manipulation;
+      liveSignal[sym] = d.signal_state;
+
+      // If SSE hasn't populated candles yet, seed from server
+      if (!liveCandles[sym] || !liveCandles[sym]['5m'] || liveCandles[sym]['5m'].length === 0) {
+        if (!liveCandles[sym]) liveCandles[sym] = {};
+        liveCandles[sym]['5m'] = d.candles_5m || [];
+        liveCandles[sym]['15m'] = d.candles_15m || [];
+        chartChanged = true;
+      }
+    }
+
+    // Redraw all charts every poll — safety net if SSE stalls
+    for (const sym of syms) {
+      drawMiniChart(sym, liveCandles[sym]?.['5m'] || [], liveManip[sym], liveSignal[sym] || {});
+    }
+
+    lastState = fresh;
+    updateTopbarStats(fresh.account);
+    updateSessions(fresh.market_sessions);
+    updateClosedTrades(fresh.closed_trades);
+    updateEventLog(fresh.event_log);
   } catch (e) { /* silent */ }
 }
 
@@ -151,6 +193,23 @@ function renderFull(state) {
   updateTopbarStats(state.account);
   updateSessions(state.market_sessions);
   updateSelector(state);
+
+  // Initialize live chart state from server snapshot
+  liveCandles = {};
+  liveManip = {};
+  liveSignal = {};
+  const syms = state.symbols || [];
+  const data = state.data || {};
+  for (const sym of syms) {
+    const d = data[sym] || {};
+    liveCandles[sym] = {
+      '5m': d.candles_5m || [],
+      '15m': d.candles_15m || []
+    };
+    liveManip[sym] = d.manipulation;
+    liveSignal[sym] = d.signal_state || {};
+  }
+
   buildSymbolPanels(state);
   updateClosedTrades(state.closed_trades);
   updateEventLog(state.event_log);
@@ -158,8 +217,8 @@ function renderFull(state) {
     (state.symbols || []).length + ' symbols';
 
   // Track initial prices for flash detection
-  for (const sym of (state.symbols || [])) {
-    const d = (state.data || {})[sym] || {};
+  for (const sym of syms) {
+    const d = data[sym] || {};
     const tick = d.ticker || {};
     if (tick.price) lastPrices[sym] = tick.price;
   }
@@ -436,10 +495,9 @@ function buildSymbolPanels(state) {
     grid.innerHTML += html;
   }
 
-  // Draw charts
+  // Draw charts using live data
   for (const sym of syms) {
-    const d = data[sym] || {};
-    drawMiniChart(sym, d.candles_5m || [], d.manipulation, d.signal_state || {});
+    drawMiniChart(sym, liveCandles[sym]?.['5m'] || [], liveManip[sym], liveSignal[sym] || {});
   }
 }
 
@@ -469,24 +527,45 @@ function fmtVolume(v) {
 
 function drawMiniChart(sym, c5, manip, sig) {
   const canvas = document.getElementById('chart-' + sym);
-  if (!canvas || c5.length < 2) return;
+  if (!canvas) return;
+  if (!c5 || c5.length < 2) {
+    // Not enough data yet — clear canvas gracefully
+    const ctx = canvas.getContext('2d');
+    canvas.width = canvas.offsetWidth || 200;
+    canvas.height = 110;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#5d606b';
+    ctx.font = '9px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('Waiting for data...', canvas.width / 2, 55);
+    return;
+  }
+
+  // Filter out candles with NaN/Infinity prices
+  const clean = c5.filter(c => isFinite(c.o) && isFinite(c.h) && isFinite(c.l) && isFinite(c.c));
+  if (clean.length < 2) return;
+
   const ctx = canvas.getContext('2d');
-  const W = canvas.width = canvas.offsetWidth;
+  const W = canvas.width = Math.max(canvas.offsetWidth || 200, 100);
   const H = canvas.height = 110;
   ctx.clearRect(0, 0, W, H);
 
   const ml = 35, mr = 8, mt = 6, mb = 14;
   const pw = W - ml - mr, ph = H - mt - mb;
+  if (pw <= 0 || ph <= 0) return;
 
   const prices = [];
-  for (const c of c5) { prices.push(c.h, c.l); }
+  for (const c of clean) { prices.push(c.h, c.l); }
   let pmin = Math.min(...prices), pmax = Math.max(...prices);
+  if (!isFinite(pmin) || !isFinite(pmax) || pmax === pmin) {
+    pmin -= 1; pmax += 1;
+  }
   const pad = (pmax - pmin) * 0.06 || pmax * 0.01 || 1;
   pmin -= pad; pmax += pad;
 
-  const xScale = (i) => ml + (i / (c5.length - 1)) * pw;
+  const xScale = (i) => ml + (i / (clean.length - 1)) * pw;
   const yScale = (p) => mt + (1 - (p - pmin) / (pmax - pmin)) * ph;
-  const barW = Math.max(1, (pw / c5.length) * 0.65);
+  const barW = Math.max(1, (pw / clean.length) * 0.65);
 
   // Grid lines
   ctx.strokeStyle = '#2a2e39'; ctx.lineWidth = 0.5;
@@ -496,8 +575,8 @@ function drawMiniChart(sym, c5, manip, sig) {
   }
 
   // Candles
-  for (let i = 0; i < c5.length; i++) {
-    const c = c5[i]; const x = xScale(i);
+  for (let i = 0; i < clean.length; i++) {
+    const c = clean[i]; const x = xScale(i);
     const oy = yScale(c.o), cy = yScale(c.c);
     const hy = yScale(c.h), ly = yScale(c.l);
 
@@ -538,7 +617,7 @@ function drawMiniChart(sym, c5, manip, sig) {
 
   // Price labels
   ctx.fillStyle = '#5d606b'; ctx.font = '8px monospace'; ctx.textAlign = 'right';
-  const dec = c5[0].o < 1 ? 5 : 2;
+  const dec = clean[0].o < 1 ? 5 : 2;
   ctx.fillText('$' + pmax.toFixed(dec), ml - 3, mt + 8);
   ctx.fillText('$' + pmin.toFixed(dec), ml - 3, mt + ph);
 }
