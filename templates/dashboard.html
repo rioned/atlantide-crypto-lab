@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ATLANTIDE — Pattern Scalp | Per-Symbol Capital</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0d14; color: #ccddee;
+      font-family: 'Courier New', Courier, monospace;
+      padding: 16px; max-width: 1600px; margin: 0 auto;
+    }
+    .header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 10px 0; border-bottom: 1px solid #1e2a3a; margin-bottom: 14px;
+      flex-wrap: wrap; gap: 10px;
+    }
+    .header-left { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .logo { font-size: 16px; font-weight: bold; color: #00d4ff; letter-spacing: 2px; }
+    .live-pill { font-size: 10px; font-weight: bold; padding: 3px 10px; border-radius: 10px;
+      background: #00ff88; color: #0a0d14; letter-spacing: 1px; }
+    .clock { font-size: 16px; letter-spacing: 2px; color: #8899aa; }
+    .btn { background: transparent; padding: 5px 14px; font-family: inherit; font-size: 11px; cursor: pointer;
+      border-radius: 3px; letter-spacing: 1px; transition: all 0.2s; }
+    .btn-danger { color: #ff3366; border: 1px solid #ff3366; }
+    .btn-danger:hover { background: #ff3366; color: #0a0d14; }
+    .btn-cyan { color: #00d4ff; border: 1px solid #00d4ff; }
+    .btn-cyan:hover { background: #00d4ff; color: #0a0d14; }
+    .btn-sm { padding: 2px 8px; font-size: 9px; }
+
+    /* Symbol selector bar */
+    .selector-bar {
+      display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+      background: #111620; border: 1px solid #1e2a3a; border-radius: 8px;
+      padding: 8px 14px; margin-bottom: 14px;
+    }
+    .selector-bar .label { font-size: 10px; color: #667788; letter-spacing: 1px; text-transform: uppercase; }
+    .selector-bar select {
+      background: #0a0d14; color: #ccddee; border: 1px solid #1e2a3a;
+      padding: 4px 8px; font-family: inherit; font-size: 11px; border-radius: 4px;
+    }
+    .active-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-left: 8px; }
+    .active-chip {
+      background: #141a24; border: 1px solid #1e2a3a; border-radius: 4px;
+      padding: 3px 8px; font-size: 10px; display: flex; align-items: center; gap: 6px;
+    }
+    .active-chip .remove-chip { color: #ff3366; cursor: pointer; font-weight: bold; }
+    .active-chip .remove-chip:hover { color: #ff6688; }
+
+    /* Account cards */
+    .acct-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin-bottom: 14px; }
+    .acct-card { background: #111620; border: 1px solid #1e2a3a; border-radius: 6px; padding: 10px 14px; }
+    .acct-card .label { font-size: 9px; text-transform: uppercase; letter-spacing: 2px; color: #667788; margin-bottom: 2px; }
+    .acct-card .value { font-size: 17px; font-weight: bold; font-variant-numeric: tabular-nums; }
+    .cyan { color: #00d4ff; } .green { color: #00ff88; } .red { color: #ff3366; }
+
+    /* 2×2 symbol grid */
+    .symbol-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+
+    .sym-panel { background: #111620; border: 1px solid #1e2a3a; border-radius: 8px; padding: 0; overflow: hidden; }
+    .sym-header { display: flex; justify-content: space-between; align-items: flex-start;
+      padding: 10px 14px; border-bottom: 1px solid #1e2a3a; }
+    .sym-name { font-size: 14px; font-weight: bold; letter-spacing: 1px; }
+    .sym-price { font-size: 16px; font-weight: bold; font-variant-numeric: tabular-nums; text-align: right; }
+    .sym-change { font-size: 11px; text-align: right; }
+    .sym-capital { font-size: 10px; color: #8899aa; margin-top: 4px; }
+    .sym-capital .cap-value { font-weight: bold; font-variant-numeric: tabular-nums; }
+
+    .sym-status { padding: 8px 14px; font-size: 11px; text-align: center; letter-spacing: 1px; font-weight: bold; border-bottom: 1px solid #1e2a3a; }
+    .sym-status.WAITING { background: #141a24; color: #667788; }
+    .sym-status.MANIPULATION { background: #1a1500; color: #ffcc00; }
+    .sym-status.LONG { background: #003322; color: #00ff88; animation: pulse-green 1.5s infinite; }
+    .sym-status.SHORT { background: #330011; color: #ff3366; animation: pulse-red 1.5s infinite; }
+    @keyframes pulse-green {
+      0%,100% { box-shadow: inset 0 0 8px #00ff8844; } 50% { box-shadow: inset 0 0 20px #00ff8888; }
+    }
+    @keyframes pulse-red {
+      0%,100% { box-shadow: inset 0 0 8px #ff336644; } 50% { box-shadow: inset 0 0 20px #ff336688; }
+    }
+
+    .sym-stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px; background: #1e2a3a; }
+    .sym-stat { background: #111620; padding: 8px 10px; text-align: center; }
+    .sym-stat .slabel { font-size: 8px; text-transform: uppercase; letter-spacing: 1px; color: #667788; margin-bottom: 2px; }
+    .sym-stat .svalue { font-size: 11px; font-weight: bold; font-variant-numeric: tabular-nums; }
+
+    .sym-chart { padding: 8px 10px; }
+    .sym-positions { padding: 6px 14px; border-top: 1px solid #1e2a3a; font-size: 10px; color: #667788; max-height: 70px; overflow-y: auto; }
+    .sym-pos-item { padding: 2px 0; display: flex; justify-content: space-between; }
+    .sym-pos-item .pnl-positive { color: #00ff88; } .sym-pos-item .pnl-negative { color: #ff3366; }
+    .sym-canvas { display: block; width: 100%; height: 130px; border-radius: 2px; }
+
+    /* Tables */
+    .table-wrapper { background: #111620; border: 1px solid #1e2a3a; border-radius: 8px; padding: 12px; margin-bottom: 14px; }
+    .table-wrapper h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 2px; color: #667788; margin-bottom: 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    th { text-align: left; padding: 5px 8px; color: #667788; font-size: 9px;
+      text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid #1e2a3a; }
+    td { padding: 5px 8px; border-bottom: 1px solid #141a24; font-variant-numeric: tabular-nums; }
+    tr:hover { background: #141a24; }
+    .pnl-positive { color: #00ff88; } .pnl-negative { color: #ff3366; }
+    .badge { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 9px; font-weight: bold; letter-spacing: 1px; }
+    .badge-win { background: #003322; color: #00ff88; } .badge-loss { background: #330011; color: #ff3366; }
+    .badge-long { background: #003322; color: #00ff88; } .badge-short { background: #330011; color: #ff3366; }
+
+    .event-log { background: #111620; border: 1px solid #1e2a3a; border-radius: 8px; padding: 12px; max-height: 180px; overflow-y: auto; }
+    .event-log h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 2px; color: #667788; margin-bottom: 8px; }
+    .log-entry { padding: 2px 0; font-size: 10px; border-bottom: 1px solid #141a24; }
+    .log-time { color: #556677; margin-right: 6px; }
+    .log-tag-SYSTEM { color: #8899aa; } .log-tag-SIGNAL { color: #ffcc00; } .log-tag-TRADE { color: #00d4ff; }
+    .log-tag-WIN { color: #00ff88; } .log-tag-LOSS { color: #ff3366; }
+    .log-tag-WARN { color: #ff6600; } .log-tag-INFO { color: #8899aa; } .log-tag-ERROR { color: #ff3366; }
+
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: #0a0d14; }
+    ::-webkit-scrollbar-thumb { background: #1e2a3a; border-radius: 3px; }
+
+    .loading-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(10,13,20,0.85); z-index: 999; justify-content: center; align-items: center; flex-direction: column; gap: 14px; }
+    .loading-overlay.active { display: flex; }
+    .loading-spinner { width: 36px; height: 36px; border: 3px solid #1e2a3a; border-top: 3px solid #00d4ff; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading-text { color: #00d4ff; font-size: 13px; letter-spacing: 1px; }
+
+    .no-data { text-align: center; color: #556677; padding: 20px; font-size: 11px; }
+  </style>
+</head>
+<body>
+
+  <div class="loading-overlay" id="loadingOverlay">
+    <div class="loading-spinner"></div>
+    <div class="loading-text" id="loadingText">Connecting...</div>
+  </div>
+
+  <!-- HEADER -->
+  <div class="header">
+    <div class="header-left">
+      <span class="logo">⚡ ATLANTIDE — Pattern Scalp</span>
+      <span class="live-pill" id="livePill">● LIVE</span>
+      <span style="font-size:10px;color:#556677;" id="symCount"></span>
+    </div>
+    <div>
+      <span class="clock" id="clock">00:00:00</span>
+      <button class="btn btn-danger" onclick="resetAll()">⟳ RESET ALL</button>
+    </div>
+  </div>
+
+  <!-- SYMBOL SELECTOR -->
+  <div class="selector-bar">
+    <span class="label">Active:</span>
+    <div class="active-chips" id="activeChips"></div>
+    <select id="symbolSelect" style="margin-left:auto;">
+      <option value="">+ Add Symbol</option>
+    </select>
+    <button class="btn btn-cyan btn-sm" onclick="addSymbol()">Add</button>
+  </div>
+
+  <!-- AGGREGATED ACCOUNT STATS -->
+  <div class="acct-grid" id="accountCards">
+    <div class="acct-card"><div class="label">Total Balance</div><div class="value cyan" id="valBalance">$0.00</div></div>
+    <div class="acct-card"><div class="label">Total PnL</div><div class="value" id="valTotalPnl">$0.00</div></div>
+    <div class="acct-card"><div class="label">Win Rate</div><div class="value" id="valWinrate">0.0%</div></div>
+    <div class="acct-card"><div class="label">Total Peak</div><div class="value" id="valPeak">$0.00</div></div>
+    <div class="acct-card"><div class="label">Max DD</div><div class="value red" id="valDD">0.00%</div></div>
+    <div class="acct-card"><div class="label">Trades</div><div class="value cyan" id="valTradeCount">0</div></div>
+  </div>
+
+  <!-- SYMBOL PANELS -->
+  <div class="symbol-grid" id="symbolGrid"></div>
+
+  <!-- TRADE HISTORY -->
+  <div class="table-wrapper">
+    <h3>📜 Trade History <span style="color:#667788;font-weight:normal;" id="closedCount">(0)</span></h3>
+    <table>
+      <thead><tr><th>Sym</th><th>ID</th><th>Side</th><th>Entry</th><th>Exit</th><th>Notional</th><th>PnL</th><th>Result</th><th>Time</th></tr></thead>
+      <tbody id="closedTbody">
+        <tr><td colspan="9" style="text-align:center;color:#556677;">No closed trades</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- EVENT LOG -->
+  <div class="event-log" id="eventLogContainer">
+    <h3>📝 Event Log</h3>
+    <div id="eventLog"></div>
+  </div>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>
