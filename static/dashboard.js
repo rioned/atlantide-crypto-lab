@@ -1,45 +1,210 @@
-// ATLANTIDE — Multi-Symbol Dashboard JS
-// Dynamic symbol management, per-symbol capital, 10% risk/trade
-// Market session countdowns + 10-minute browser notifications
-let refreshInterval = null;
+/* ════════════════════════════════════════════════════════════════════════════
+   ATLANTIDE CRYPTO LAB — Professional Dashboard JS
+   SSE streaming | Price flash | TradingView-inspired | Fluid grid
+   ════════════════════════════════════════════════════════════════════════════ */
+
 let symOrder = [];
-let allSymbols = [];  // full list from /api/symbols
-let userTzOffset = 0;       // hours from UTC (auto-detected)
-let notifiedSessions = {};  // session_id -> true (prevent re-notify)
-let sessionTimers = {};     // session_id -> setInterval handle
+let allSymbols = [];
+let userTzOffset = 0;
+let notifiedSessions = {};
+let sessionTimers = {};
+let eventSource = null;
+let lastPrices = {};       // sym → price (for flash detection)
+let lastState = null;      // cached /api/state for fallback
+let stateTimer = null;
 
 // ─── Init ────────────────────────────────────────────────────────
+
 async function init() {
-  userTzOffset = -(new Date().getTimezoneOffset() / 60);  // hours from UTC
+  userTzOffset = -(new Date().getTimezoneOffset() / 60);
   await requestNotificationPermission();
   await loadSymbolList();
-  await refresh();
-  refreshInterval = setInterval(refresh, 2000);
+
+  // Initial full state load
+  const resp = await fetch('/api/state?tz=' + userTzOffset);
+  if (resp.ok) {
+    lastState = await resp.json();
+    renderFull(lastState);
+  }
+
+  document.getElementById('loadingOverlay').classList.remove('active');
+
+  // Open SSE stream for real-time updates
+  connectSSE();
+
+  // Fallback: poll every 5s for non-SSE data (sessions, trades, logs)
+  stateTimer = setInterval(pollState, 5000);
+
+  // Clock ticker
+  setInterval(() => {
+    const now = new Date();
+    document.getElementById('clock').textContent = now.toTimeString().split(' ')[0];
+  }, 1000);
 }
 
-// ─── Notifications ──────────────────────────────────────────────
-async function requestNotificationPermission() {
-  if (!('Notification' in window)) return;
-  if (Notification.permission === 'granted') return;
-  if (Notification.permission === 'denied') return;
+// ─── SSE Streaming ──────────────────────────────────────────────
+
+function connectSSE() {
+  if (eventSource) eventSource.close();
+  eventSource = new EventSource('/api/stream');
+
+  eventSource.addEventListener('connected', () => {
+    console.log('SSE connected');
+    document.getElementById('livePill').textContent = '● LIVE';
+    document.getElementById('livePill').style.background = 'var(--green-bg)';
+    document.getElementById('livePill').style.color = 'var(--green)';
+  });
+
+  eventSource.addEventListener('ticker', (e) => {
+    const data = JSON.parse(e.data);
+    handleTickerUpdate(data);
+  });
+
+  eventSource.addEventListener('kline', (e) => {
+    const data = JSON.parse(e.data);
+    handleKlineUpdate(data);
+  });
+
+  eventSource.addEventListener('ping', () => {
+    // Keep connection alive — heartbeat received
+  });
+
+  eventSource.onerror = () => {
+    console.log('SSE disconnected, reconnecting in 3s...');
+    document.getElementById('livePill').textContent = '○ RECONNECTING';
+    document.getElementById('livePill').style.background = 'var(--yellow-bg)';
+    document.getElementById('livePill').style.color = 'var(--yellow)';
+    setTimeout(connectSSE, 3000);
+  };
+}
+
+// ─── Real-time Handlers ─────────────────────────────────────────
+
+function handleTickerUpdate(data) {
+  const sym = data.symbol;
+  const price = data.price;
+  const prevPrice = lastPrices[sym] || price;
+
+  // Update price display with flash
+  const priceEl = document.getElementById('price-' + sym);
+  if (priceEl) {
+    const priceDec = price > 1000 ? 2 : price > 1 ? 4 : 6;
+    priceEl.textContent = '$' + price.toFixed(priceDec);
+
+    // Flash animation
+    if (price > prevPrice) {
+      priceEl.classList.remove('flash-down');
+      priceEl.classList.add('flash-up');
+      setTimeout(() => priceEl.classList.remove('flash-up'), 400);
+      priceEl.style.color = 'var(--green)';
+    } else if (price < prevPrice) {
+      priceEl.classList.remove('flash-up');
+      priceEl.classList.add('flash-down');
+      setTimeout(() => priceEl.classList.remove('flash-down'), 400);
+      priceEl.style.color = 'var(--red)';
+    }
+  }
+
+  // Update change %
+  const chgEl = document.getElementById('change-' + sym);
+  if (chgEl && data.change_pct !== undefined) {
+    const chg = data.change_pct;
+    const chgClass = chg >= 0 ? 'var(--green)' : 'var(--red)';
+    chgEl.textContent = (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%';
+    chgEl.style.color = chgClass;
+  }
+
+  lastPrices[sym] = price;
+}
+
+function handleKlineUpdate(data) {
+  const sym = data.symbol;
+  // Only redraw chart on closed candles to avoid flicker
+  if (data.is_closed && lastState) {
+    // Update cached candle data
+    const symData = lastState.data[sym];
+    if (symData) {
+      const cList = symData.candles_5m || [];
+      cList.push(data.candle);
+      if (cList.length > 60) cList.shift();
+      drawMiniChart(sym, cList, symData.manipulation, symData.signal_state);
+    }
+  }
+}
+
+// ─── Poll state for non-SSE data ────────────────────────────────
+
+async function pollState() {
   try {
-    const result = await Notification.requestPermission();
-    console.log('Notification permission:', result);
-  } catch (e) { console.log('Notification not supported'); }
+    const resp = await fetch('/api/state?tz=' + userTzOffset);
+    if (!resp.ok) return;
+    lastState = await resp.json();
+    updateSessions(lastState.market_sessions);
+    updateClosedTrades(lastState.closed_trades);
+    updateEventLog(lastState.event_log);
+  } catch (e) { /* silent */ }
 }
 
-// ─── Market Sessions ───────────────────────────────────────────
-function updateMarketSessions(sessions, utcTime) {
-  const bar = document.getElementById('sessionsBar');
+// ─── Full Render ─────────────────────────────────────────────────
+
+function renderFull(state) {
+  updateTopbarStats(state.account);
+  updateSessions(state.market_sessions);
+  updateSelector(state);
+  buildSymbolPanels(state);
+  updateClosedTrades(state.closed_trades);
+  updateEventLog(state.event_log);
+  document.getElementById('symCount').textContent =
+    (state.symbols || []).length + ' symbols';
+
+  // Track initial prices for flash detection
+  for (const sym of (state.symbols || [])) {
+    const d = (state.data || {})[sym] || {};
+    const tick = d.ticker || {};
+    if (tick.price) lastPrices[sym] = tick.price;
+  }
+}
+
+// ─── Top Bar Stats ───────────────────────────────────────────────
+
+function updateTopbarStats(acct) {
+  if (!acct) return;
+  const pnl = acct.total_pnl || 0;
+  const pnlClass = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+  const pnlSign = pnl >= 0 ? '+' : '';
+
+  document.getElementById('topbarStats').innerHTML =
+    '<div class="topbar-stat">' +
+    '<div class="label">Balance</div>' +
+    '<div class="value" style="color:' + pnlClass + '">$' + (acct.balance || 0).toFixed(2) + '</div>' +
+    '</div>' +
+    '<div class="topbar-stat">' +
+    '<div class="label">PnL</div>' +
+    '<div class="value" style="color:' + pnlClass + '">' + pnlSign + '$' + pnl.toFixed(2) + '</div>' +
+    '</div>' +
+    '<div class="topbar-stat">' +
+    '<div class="label">Win Rate</div>' +
+    '<div class="value" style="color:var(--text-primary)">' + (acct.winrate || 0).toFixed(1) + '%</div>' +
+    '</div>' +
+    '<div class="topbar-stat">' +
+    '<div class="label">Trades</div>' +
+    '<div class="value" style="color:var(--text-primary)">' + (acct.total_trades || 0) + '</div>' +
+    '</div>' +
+    '<div class="topbar-stat">' +
+    '<div class="label">Max DD</div>' +
+    '<div class="value" style="color:var(--red)">-' + (acct.max_drawdown || 0).toFixed(2) + '%</div>' +
+    '</div>';
+}
+
+// ─── Sessions ───────────────────────────────────────────────────
+
+function updateSessions(sessions) {
   if (!sessions || sessions.length === 0) return;
 
-  // Kill old countdown timers
   for (const id of Object.keys(sessionTimers)) {
     clearInterval(sessionTimers[id]);
     delete sessionTimers[id];
   }
-
-  const now = new Date();
 
   let html = '';
   for (const s of sessions) {
@@ -47,59 +212,41 @@ function updateMarketSessions(sessions, utcTime) {
     const display = formatCountdown(Math.max(0, countdownSec));
     const isAlert = !s.is_open && countdownSec <= 600 && countdownSec > 0;
 
-    let cardClass = '';
-    let countClass = 'IDLE';
-    let badgeClass = 'CLOSED';
-    let badgeText = 'CLOSED';
+    let cardClass = '', countClass = 'IDLE', badgeClass = 'CLOSED', badgeText = 'CLOSED';
 
     if (s.is_open) {
-      cardClass = 'OPEN';
-      countClass = 'OPEN';
-      badgeClass = 'OPEN';
-      badgeText = '● OPEN';
-      // Reset notification flag when session opens
+      cardClass = 'OPEN'; countClass = 'OPEN';
+      badgeClass = 'OPEN'; badgeText = '● OPEN';
       notifiedSessions[s.id] = false;
     } else if (isAlert) {
-      cardClass = 'ALERT';
-      countClass = 'ALERT';
-      badgeClass = 'UPCOMING';
-      badgeText = '⏰ OPENING SOON';
+      cardClass = 'ALERT'; countClass = 'ALERT';
+      badgeClass = 'UPCOMING'; badgeText = '⏰ SOON';
     } else {
-      countClass = 'IDLE';
-      badgeClass = 'UPCOMING';
-      badgeText = 'UPCOMING';
+      badgeClass = 'UPCOMING'; badgeText = 'UPCOMING';
     }
-
-    const localLabel = userTzOffset === 0 ? 'UTC' :
-      'UTC' + (userTzOffset >= 0 ? '+' : '') + userTzOffset.toFixed(1);
 
     html += '<div class="session-card ' + cardClass + '" id="sess-' + s.id + '">';
     html += '<div class="sess-emoji">' + s.emoji + '</div>';
     html += '<div class="sess-name">' + s.name + '</div>';
     html += '<div class="sess-countdown ' + countClass + '" id="cd-' + s.id + '">' + display + '</div>';
-    html += '<div class="sess-times">' + s.open_local + ' – ' + s.close_local +
-      ' <span style="color:#445566;">(' + localLabel + ')</span></div>';
-    html += '<div class="sess-times" style="margin-top:2px;">' + s.open_utc + ' – ' + s.close_utc + '</div>';
+    html += '<div class="sess-times">' + s.open_local + ' – ' + s.close_local + '</div>';
     html += '<span class="sess-badge ' + badgeClass + '">' + badgeText + '</span>';
     html += '</div>';
 
-    // Fire 10-min notification
     if (isAlert && !notifiedSessions[s.id]) {
       notifiedSessions[s.id] = true;
-      showToast(s.name, s.open_local + ' (' + localLabel + ')');
+      showToast(s.name, s.open_local);
       sendBrowserNotification(s);
     }
 
-    // Start 1-second countdown timer for this card
     startCountdownTimer(s);
   }
-
-  bar.innerHTML = html;
+  document.getElementById('sessionsBar').innerHTML = html;
 }
 
 function startCountdownTimer(session) {
   let remaining = session.is_open ? session.time_until_close : session.time_until_open;
-  if (remaining <= 0 && !session.is_open) remaining = 86400; // next day
+  if (remaining <= 0 && !session.is_open) remaining = 86400;
 
   sessionTimers[session.id] = setInterval(() => {
     remaining--;
@@ -127,14 +274,11 @@ function showToast(sessionName, openTime) {
   const container = document.getElementById('toastContainer');
   const toastId = 'toast-' + Date.now();
   const toast = document.createElement('div');
-  toast.className = 'toast';
-  toast.id = toastId;
+  toast.className = 'toast'; toast.id = toastId;
   toast.innerHTML = '<div class="toast-title">🔔 MARKET OPENING</div>' +
     '<div class="toast-body"><b>' + sessionName + '</b> opens in <10 min at ' + openTime + '</div>' +
     '<span class="toast-dismiss" onclick="dismissToast(\'' + toastId + '\')">×</span>';
   container.appendChild(toast);
-
-  // Auto-dismiss after 10 seconds
   setTimeout(() => dismissToast(toastId), 10000);
 }
 
@@ -148,88 +292,45 @@ function sendBrowserNotification(session) {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   try {
     const n = new Notification('🔔 ' + session.name + ' Opening Soon', {
-      body: 'Opens in less than 10 minutes at ' + session.open_local +
-        ' (' + session.open_utc + ')',
-      icon: '/static/favicon.ico',
-      tag: 'session-' + session.id,
-      requireInteraction: false,
+      body: 'Opens in less than 10 minutes at ' + session.open_local,
+      tag: 'session-' + session.id, requireInteraction: false,
     });
     setTimeout(() => n.close(), 8000);
-  } catch (e) { console.log('Notification error:', e); }
+  } catch (e) {}
 }
 
-// ─── Load full symbol list for selector ─────────────────────────
+// ─── Notifications permission ───────────────────────────────────
+
+async function requestNotificationPermission() {
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'granted' || Notification.permission === 'denied') return;
+  try { await Notification.requestPermission(); } catch (e) {}
+}
+
+// ─── Symbol List ────────────────────────────────────────────────
+
 async function loadSymbolList() {
   try {
     const resp = await fetch('/api/symbols');
     if (resp.ok) allSymbols = await resp.json();
-  } catch (e) { console.error('Symbol list error:', e); }
+  } catch (e) {}
 }
 
-// ─── Main Refresh ──────────────────────────────────────────────
-async function refresh() {
-  try {
-    const resp = await fetch('/api/state?tz=' + userTzOffset);
-    if (!resp.ok) return;
-    const state = await resp.json();
-    updateHeader(state);
-    updateMarketSessions(state.market_sessions, state.utc_time);
-    updateAccount(state.account);
-    updateSelector(state);
-    buildSymbolPanels(state);
-    updateClosedTrades(state.closed_trades);
-    updateEventLog(state.event_log);
-    document.getElementById('loadingOverlay').classList.remove('active');
-  } catch (e) {
-    console.error('Refresh error:', e);
-  }
-}
+// ─── Selector ───────────────────────────────────────────────────
 
-// ─── Header ────────────────────────────────────────────────────
-function updateHeader(state) {
-  const now = new Date();
-  document.getElementById('clock').textContent = now.toTimeString().split(' ')[0];
-  document.getElementById('livePill').textContent = '● LIVE';
-  document.getElementById('livePill').style.background = '#00ff88';
-  const count = (state.symbols || []).length;
-  document.getElementById('symCount').textContent = count + ' symbols';
-}
-
-// ─── Account ───────────────────────────────────────────────────
-function updateAccount(acct) {
-  document.getElementById('valBalance').textContent = '$' + (acct.balance || 0).toFixed(2);
-  const pnl = acct.total_pnl || 0;
-  const pnlEl = document.getElementById('valTotalPnl');
-  pnlEl.textContent = '$' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2);
-  pnlEl.className = 'value ' + (pnl >= 0 ? 'green' : 'red');
-
-  document.getElementById('valWinrate').textContent = (acct.winrate || 0).toFixed(1) + '%';
-  document.getElementById('valPeak').textContent = '$' + (acct.peak || 0).toFixed(2);
-  document.getElementById('valDD').textContent = '-' + (acct.max_drawdown || 0).toFixed(2) + '%';
-  document.getElementById('valTradeCount').textContent = (acct.total_trades || 0);
-
-  const balEl = document.getElementById('valBalance');
-  balEl.className = 'value ' + ((acct.total_pnl || 0) >= 0 ? 'green' : 'red');
-}
-
-// ─── Symbol Selector ──────────────────────────────────────────
 function updateSelector(state) {
   const syms = state.symbols || [];
   symOrder = syms;
 
-  // Active chips
-  const chipsDiv = document.getElementById('activeChips');
   let chipsHtml = '';
   for (const sym of syms) {
     const display = (state.data[sym] || {}).display || sym;
     chipsHtml += '<span class="active-chip">' + display +
       ' <span class="remove-chip" onclick="removeSymbol(\'' + sym + '\')" title="Remove">×</span></span>';
   }
-  chipsDiv.innerHTML = chipsHtml;
+  document.getElementById('activeChips').innerHTML = chipsHtml;
 
-  // Dropdown: show only inactive symbols
   const select = document.getElementById('symbolSelect');
-  // Preserve selected value
   const currentVal = select.value;
   select.innerHTML = '<option value="">+ Add Symbol</option>';
   const activeSet = new Set(syms);
@@ -238,65 +339,19 @@ function updateSelector(state) {
       select.innerHTML += '<option value="' + s.code + '">' + s.display + '</option>';
     }
   }
-  if (currentVal && activeSet.has(currentVal)) {
-    select.value = '';  // was active, clear
-  } else if (currentVal) {
-    select.value = currentVal;
-  }
+  if (currentVal && activeSet.has(currentVal)) select.value = '';
+  else if (currentVal) select.value = currentVal;
 }
 
-// ─── Add Symbol ────────────────────────────────────────────────
-async function addSymbol() {
-  const select = document.getElementById('symbolSelect');
-  const sym = select.value;
-  if (!sym) return;
-  showLoading('Adding ' + sym + '...');
-  try {
-    const resp = await fetch('/api/symbol/add', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol: sym })
-    });
-    const data = await resp.json();
-    if (data.status === 'ok') {
-      select.value = '';
-      await loadSymbolList();
-    } else {
-      alert(data.message);
-    }
-  } catch (e) { alert('Add failed: ' + e); }
-  hideLoading();
-}
+// ─── Symbol Panels ──────────────────────────────────────────────
 
-// ─── Remove Symbol ──────────────────────────────────────────────
-async function removeSymbol(sym) {
-  if (!confirm('Remove ' + sym + ' from active trading?')) return;
-  showLoading('Removing ' + sym + '...');
-  try {
-    const resp = await fetch('/api/symbol/remove', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol: sym })
-    });
-    const data = await resp.json();
-    if (data.status === 'ok') {
-      await loadSymbolList();
-    } else {
-      alert(data.message);
-    }
-  } catch (e) { alert('Remove failed: ' + e); }
-  hideLoading();
-}
-
-// ─── Symbol Panels ────────────────────────────────────────────
 function buildSymbolPanels(state) {
   const syms = state.symbols || [];
   const data = state.data || {};
-  symOrder = syms;
 
   const grid = document.getElementById('symbolGrid');
   if (syms.length === 0) {
-    grid.innerHTML = '<div class="no-data">No active symbols. Use the selector above to add some.</div>';
+    grid.innerHTML = '<div class="empty-state">No active symbols. Add one above.</div>';
     return;
   }
 
@@ -316,122 +371,116 @@ function buildSymbolPanels(state) {
     const price = tick.price || 0;
     const chg = tick.change_pct || 0;
     const priceDec = price > 1000 ? 2 : price > 1 ? 4 : 6;
+    const chgColor = chg >= 0 ? 'var(--green)' : 'var(--red)';
 
-    // Determine status
-    let statusClass = 'WAITING';
-    let statusText = '⏳ WAITING';
+    // Signal status
+    let sigClass = 'IDLE', sigText = '⏳ WAITING';
     if (sig.signal && sig.signal !== 'None') {
-      statusClass = sig.signal;
-      statusText = '🔥 ' + sig.signal + ' — ' + (sig.pattern_type || '') +
-        ' | TP=$' + (sig.tp || 0).toFixed(priceDec) + ' SL=$' + (sig.sl || 0).toFixed(priceDec);
+      sigClass = sig.signal;
+      sigText = '🔥 ' + sig.signal + ' — ' + (sig.pattern_type || '') +
+        ' | TP=$' + (sig.tp || 0).toFixed(priceDec) +
+        ' SL=$' + (sig.sl || 0).toFixed(priceDec);
     } else if (manip) {
-      statusClass = 'MANIPULATION';
-      statusText = '⚠ MANIP: ' + manip.direction + ' Range=$' + (manip.range || 0).toFixed(priceDec);
+      sigClass = 'MANIPULATION';
+      sigText = '⚠ MANIP: ' + manip.direction +
+        ' Range=$' + (manip.range || 0).toFixed(priceDec);
     }
 
-    const pnlClass = openPnl >= 0 ? 'green' : 'red';
+    const pnlClass = openPnl >= 0 ? 'var(--green)' : 'var(--red)';
     const pnlSign = openPnl >= 0 ? '+' : '';
-    const posCount = openT.length;
-
-    // Capital PnL coloring
     const capBal = cap.balance || 500;
     const capPnl = cap.total_pnl || 0;
-    const capClass = capPnl >= 0 ? 'green' : 'red';
+    const capClass = capPnl >= 0 ? 'var(--green)' : 'var(--red)';
     const capSign = capPnl >= 0 ? '+' : '';
-
     const display = d.display || sym;
 
-    const html = `
-      <div class="sym-panel" id="panel-${sym}">
-        <div class="sym-header">
-          <div>
-            <div class="sym-name" style="color:${chg >= 0 ? '#00ff88' : '#ff3366'}">${display}</div>
-            <div class="sym-change" style="color:${chg >= 0 ? '#00ff88' : '#ff3366'}">${(chg >= 0 ? '+' : '') + chg.toFixed(2)}%</div>
-            <div class="sym-capital">
-              Cap: <span class="cap-value" style="color:${capPnl >= 0 ? '#00ff88' : '#ff3366'}">$${capBal.toFixed(2)}</span>
-              <span style="font-size:9px;color:${capPnl >= 0 ? '#00ff88' : '#ff3366'}">(${capSign}$${capPnl.toFixed(2)})</span>
-              <span style="margin-left:8px;font-size:9px;color:#00d4ff;">10% risk=$${(capBal * 0.10).toFixed(2)}</span>
-            </div>
-          </div>
-          <div>
-            <div class="sym-price" style="color:${chg >= 0 ? '#00ff88' : '#ff3366'}">$${price.toFixed(priceDec)}</div>
-            <div style="text-align:right;font-size:9px;color:#556677;">Risk/cap: ${((capBal * 0.10) / capBal * 100).toFixed(0)}%</div>
-          </div>
-        </div>
-        <div class="sym-status ${statusClass}">${statusText}</div>
-        <div class="sym-stats">
-          <div class="sym-stat">
-            <div class="slabel">Daily ATR</div>
-            <div class="svalue" style="color:#00d4ff">$${(ind.daily_atr || 0).toFixed(priceDec)}</div>
-          </div>
-          <div class="sym-stat">
-            <div class="slabel">Threshold</div>
-            <div class="svalue" style="color:#ffcc00">$${(ind.daily_atr_threshold || 0).toFixed(priceDec)}</div>
-          </div>
-          <div class="sym-stat">
-            <div class="slabel">5m ATR</div>
-            <div class="svalue" style="color:#8899aa">$${(ind['5m_atr14'] || 0).toFixed(priceDec)}</div>
-          </div>
-          <div class="sym-stat">
-            <div class="slabel">Cap/Wins</div>
-            <div class="svalue" style="color:#8899aa">${cap.total_trades || 0}T / ${cap.winning_trades || 0}W</div>
-          </div>
-          <div class="sym-stat">
-            <div class="slabel">Open PnL</div>
-            <div class="svalue ${pnlClass}">${posCount}pos / ${pnlSign}$${openPnl.toFixed(2)}</div>
-          </div>
-        </div>
-        <div class="sym-chart">
-          <canvas class="sym-canvas" id="chart-${sym}" width="380" height="130"></canvas>
-        </div>
-        ${posCount > 0 ? renderOpenPositions(openT, priceDec) : ''}
-        <div style="padding:4px 14px;border-top:1px solid #1e2a3a;display:flex;gap:6px;">
-          <button class="btn btn-danger btn-sm" onclick="resetSymbol('${sym}')" style="margin-left:auto;">Reset ${display}</button>
-        </div>
-      </div>
-    `;
+    const html =
+      '<div class="sym-panel" id="panel-' + sym + '">' +
+        '<div class="sym-header">' +
+          '<div class="sym-name-section">' +
+            '<div class="sym-pair" style="color:' + chgColor + '">' + display + '</div>' +
+            '<div class="sym-change" style="color:' + chgColor + '" id="change-' + sym + '">' +
+              (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%</div>' +
+            '<div class="sym-capital">' +
+              '<span>Cap: <span class="cap-val" style="color:' + capClass + '">$' + capBal.toFixed(2) + '</span></span>' +
+              '<span style="color:' + capClass + ';font-size:9px;">(' + capSign + '$' + capPnl.toFixed(2) + ')</span>' +
+              '<span style="color:var(--accent);font-size:9px;">10%=$' + (capBal * 0.10).toFixed(2) + '</span>' +
+              '<span style="color:var(--text-muted);font-size:9px;">' +
+                (cap.total_trades || 0) + 'T/' + (cap.winning_trades || 0) + 'W</span>' +
+            '</div>' +
+          '</div>' +
+          '<div class="sym-price-section">' +
+            '<div class="sym-price" id="price-' + sym + '" style="color:' + chgColor + '">$' +
+              price.toFixed(priceDec) + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="sym-signal-bar ' + sigClass + '">' + sigText + '</div>' +
+        '<div class="sym-stats">' +
+          '<div class="sym-stat"><div class="stat-label">Daily ATR</div>' +
+            '<div class="stat-value" style="color:var(--accent)">$' + (ind.daily_atr || 0).toFixed(priceDec) + '</div></div>' +
+          '<div class="sym-stat"><div class="stat-label">Threshold</div>' +
+            '<div class="stat-value" style="color:var(--yellow)">$' + (ind.daily_atr_threshold || 0).toFixed(priceDec) + '</div></div>' +
+          '<div class="sym-stat"><div class="stat-label">5m ATR</div>' +
+            '<div class="stat-value" style="color:var(--text-secondary)">$' + (ind['5m_atr14'] || 0).toFixed(priceDec) + '</div></div>' +
+          '<div class="sym-stat"><div class="stat-label">Vol/24h</div>' +
+            '<div class="stat-value" style="color:var(--text-secondary)">$' + fmtVolume(tick.volume || 0) + '</div></div>' +
+          '<div class="sym-stat"><div class="stat-label">Open PnL</div>' +
+            '<div class="stat-value" style="color:' + pnlClass + '">' + openT.length + 'pos / ' + pnlSign + '$' + openPnl.toFixed(2) + '</div></div>' +
+        '</div>' +
+        '<div class="sym-chart"><canvas class="sym-canvas" id="chart-' + sym + '"></canvas></div>' +
+        (openT.length > 0 ? renderOpenPositions(openT, priceDec) : '') +
+        '<div class="sym-footer">' +
+          '<button class="btn btn-danger btn-sm" onclick="resetSymbol(\'' + sym + '\')">Reset ' + display + '</button>' +
+        '</div>' +
+      '</div>';
     grid.innerHTML += html;
   }
 
-  // Draw charts after DOM update
+  // Draw charts
   for (const sym of syms) {
-    const c5 = (data[sym] || {}).candles_5m || [];
-    const manip = (data[sym] || {}).manipulation;
-    const sig = (data[sym] || {}).signal_state || {};
-    drawMiniChart(sym, c5, manip, sig);
+    const d = data[sym] || {};
+    drawMiniChart(sym, d.candles_5m || [], d.manipulation, d.signal_state || {});
   }
 }
 
 function renderOpenPositions(trades, priceDec) {
   let html = '<div class="sym-positions">';
   for (const t of trades) {
-    const pnlSign = (t.unrealized_pnl || 0) >= 0 ? '+' : '';
-    const pnlClass = (t.unrealized_pnl || 0) >= 0 ? 'pnl-positive' : 'pnl-negative';
-    const notional = t.notional || 250;
-    html += '<div class="sym-pos-item">';
-    html += '<span>' + t.side + ' #' + t.id + ' @$' + (t.entry_price || 0).toFixed(priceDec) +
-      ' N=$' + notional.toFixed(0) + '</span>';
-    html += '<span class="' + pnlClass + '">' + pnlSign + '$' + (t.unrealized_pnl || 0).toFixed(2) + '</span>';
-    html += '</div>';
+    const pnlS = (t.unrealized_pnl || 0) >= 0 ? '+' : '';
+    const pnlC = (t.unrealized_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+    html += '<div class="sym-pos-item">' +
+      '<span>' + t.side + ' #' + t.id + ' @$' + (t.entry_price || 0).toFixed(priceDec) +
+      ' N=$' + (t.notional || 250).toFixed(0) + '</span>' +
+      '<span style="color:' + pnlC + '">' + pnlS + '$' + (t.unrealized_pnl || 0).toFixed(2) + '</span>' +
+      '</div>';
   }
   html += '</div>';
   return html;
 }
 
-// ─── Mini Candle Chart ────────────────────────────────────────
+function fmtVolume(v) {
+  if (v >= 1e9) return (v / 1e9).toFixed(1) + 'B';
+  if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+  return v.toFixed(0);
+}
+
+// ─── Mini Candle Chart ──────────────────────────────────────────
+
 function drawMiniChart(sym, c5, manip, sig) {
   const canvas = document.getElementById('chart-' + sym);
   if (!canvas || c5.length < 2) return;
   const ctx = canvas.getContext('2d');
-  const W = canvas.width; const H = canvas.height;
+  const W = canvas.width = canvas.offsetWidth;
+  const H = canvas.height = 110;
   ctx.clearRect(0, 0, W, H);
 
-  const ml = 35, mr = 8, mt = 8, mb = 16;
-  const pw = W - ml - mr; const ph = H - mt - mb;
+  const ml = 35, mr = 8, mt = 6, mb = 14;
+  const pw = W - ml - mr, ph = H - mt - mb;
 
   const prices = [];
   for (const c of c5) { prices.push(c.h, c.l); }
-  let pmin = Math.min(...prices); let pmax = Math.max(...prices);
+  let pmin = Math.min(...prices), pmax = Math.max(...prices);
   const pad = (pmax - pmin) * 0.06 || pmax * 0.01 || 1;
   pmin -= pad; pmax += pad;
 
@@ -439,8 +488,8 @@ function drawMiniChart(sym, c5, manip, sig) {
   const yScale = (p) => mt + (1 - (p - pmin) / (pmax - pmin)) * ph;
   const barW = Math.max(1, (pw / c5.length) * 0.65);
 
-  // Grid
-  ctx.strokeStyle = '#141a24'; ctx.lineWidth = 0.5;
+  // Grid lines
+  ctx.strokeStyle = '#2a2e39'; ctx.lineWidth = 0.5;
   for (let i = 0; i <= 4; i++) {
     const y = mt + (i / 4) * ph;
     ctx.beginPath(); ctx.moveTo(ml, y); ctx.lineTo(W - mr, y); ctx.stroke();
@@ -452,10 +501,11 @@ function drawMiniChart(sym, c5, manip, sig) {
     const oy = yScale(c.o), cy = yScale(c.c);
     const hy = yScale(c.h), ly = yScale(c.l);
 
-    ctx.strokeStyle = c.c >= c.o ? '#00ff88' : '#ff3366'; ctx.lineWidth = 1;
+    const isGreen = c.c >= c.o;
+    ctx.strokeStyle = isGreen ? '#089981' : '#f23645'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(x, hy); ctx.lineTo(x, ly); ctx.stroke();
 
-    ctx.fillStyle = c.c >= c.o ? '#00ff88' : '#ff3366';
+    ctx.fillStyle = isGreen ? '#089981' : '#f23645';
     const bodyTop = Math.min(oy, cy);
     const bodyH = Math.max(1, Math.abs(cy - oy));
     ctx.fillRect(x - barW / 2, bodyTop, barW, bodyH);
@@ -463,107 +513,141 @@ function drawMiniChart(sym, c5, manip, sig) {
 
   // Manipulation lines
   if (manip) {
-    ctx.setLineDash([3, 3]); ctx.strokeStyle = '#ffcc00'; ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]); ctx.strokeStyle = '#ff9800'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(ml, yScale(manip.high)); ctx.lineTo(W - mr, yScale(manip.high)); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(ml, yScale(manip.low)); ctx.lineTo(W - mr, yScale(manip.low)); ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = '#ffcc00'; ctx.font = '8px Courier New'; ctx.textAlign = 'left';
-    ctx.fillText('M:' + manip.direction, W - mr - 50, yScale(manip.high) - 2);
+    ctx.fillStyle = '#ff9800'; ctx.font = '8px monospace'; ctx.textAlign = 'left';
+    ctx.fillText('M:' + manip.direction, W - mr - 45, yScale(manip.high) - 2);
   }
 
-  // TP/SL
+  // TP/SL lines
   if (sig.signal && sig.tp > 0) {
     ctx.setLineDash([2, 4]);
-    ctx.strokeStyle = '#00ff88'; ctx.lineWidth = 1;
+    ctx.strokeStyle = '#089981'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(ml, yScale(sig.tp)); ctx.lineTo(W - mr, yScale(sig.tp)); ctx.stroke();
-    ctx.fillStyle = '#00ff88'; ctx.font = '8px Courier New'; ctx.textAlign = 'left';
-    ctx.fillText('TP', W - mr - 20, yScale(sig.tp) - 2);
+    ctx.fillStyle = '#089981'; ctx.font = '8px monospace'; ctx.textAlign = 'left';
+    ctx.fillText('TP', W - mr - 18, yScale(sig.tp) - 2);
 
-    ctx.strokeStyle = '#ff3366';
+    ctx.strokeStyle = '#f23645';
     ctx.beginPath(); ctx.moveTo(ml, yScale(sig.sl)); ctx.lineTo(W - mr, yScale(sig.sl)); ctx.stroke();
-    ctx.fillStyle = '#ff3366';
-    ctx.fillText('SL', W - mr - 20, yScale(sig.sl) - 2);
+    ctx.fillStyle = '#f23645';
+    ctx.fillText('SL', W - mr - 18, yScale(sig.sl) - 2);
     ctx.setLineDash([]);
   }
 
   // Price labels
-  ctx.fillStyle = '#556677'; ctx.font = '8px Courier New'; ctx.textAlign = 'right';
-  ctx.fillText('$' + pmax.toFixed(c5[0].o < 1 ? 5 : 2), ml - 3, mt + 8);
-  ctx.fillText('$' + pmin.toFixed(c5[0].o < 1 ? 5 : 2), ml - 3, mt + ph);
+  ctx.fillStyle = '#5d606b'; ctx.font = '8px monospace'; ctx.textAlign = 'right';
+  const dec = c5[0].o < 1 ? 5 : 2;
+  ctx.fillText('$' + pmax.toFixed(dec), ml - 3, mt + 8);
+  ctx.fillText('$' + pmin.toFixed(dec), ml - 3, mt + ph);
 }
 
 // ─── Closed Trades ──────────────────────────────────────────────
+
 function updateClosedTrades(trades) {
   const tbody = document.getElementById('closedTbody');
-  document.getElementById('closedCount').textContent = '(' + trades.length + ' shown)';
+  document.getElementById('closedCount').textContent = '(' + (trades || []).length + ' shown)';
 
-  if (trades.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:#556677;">No closed trades</td></tr>';
+  if (!trades || trades.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:16px;">No closed trades</td></tr>';
     return;
   }
 
   let html = '';
   for (const t of trades) {
-    const pnlClass = (t.pnl || 0) >= 0 ? 'pnl-positive' : 'pnl-negative';
+    const pnlClass = (t.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
     const pnlSign = (t.pnl || 0) >= 0 ? '+' : '';
     const resultBadge = (t.pnl || 0) >= 0 ? 'badge badge-win' : 'badge badge-loss';
     const resultText = (t.pnl || 0) >= 0 ? 'WIN' : 'LOSS';
     const sideBadge = t.side === 'LONG' ? 'badge badge-long' : 'badge badge-short';
-    const sym = t.symbol || '';
     const priceDec = (t.close_price || t.entry_price || 0) > 1000 ? 2 : 4;
-    const notional = t.notional || 250;
 
-    html += '<tr>';
-    html += '<td style="color:#00d4ff;">' + sym + '</td>';
-    html += '<td>#' + t.id + '</td>';
-    html += '<td><span class="' + sideBadge + '">' + t.side + '</span></td>';
-    html += '<td>$' + (t.entry_price || 0).toFixed(priceDec) + '</td>';
-    html += '<td>$' + (t.close_price || 0).toFixed(priceDec) + '</td>';
-    html += '<td>$' + notional.toFixed(0) + '</td>';
-    html += '<td class="' + pnlClass + '">' + pnlSign + '$' + (t.pnl || 0).toFixed(2) + '</td>';
-    html += '<td><span class="' + resultBadge + '">' + resultText + '</span> ' + (t.close_reason || '') + '</td>';
-    html += '<td style="font-size:9px;color:#667788;">' + (t.close_time || '') + '</td>';
-    html += '</tr>';
+    html += '<tr>' +
+      '<td style="color:var(--accent)">' + (t.symbol || '') + '</td>' +
+      '<td>#' + t.id + '</td>' +
+      '<td><span class="' + sideBadge + '">' + t.side + '</span></td>' +
+      '<td>$' + (t.entry_price || 0).toFixed(priceDec) + '</td>' +
+      '<td>$' + (t.close_price || 0).toFixed(priceDec) + '</td>' +
+      '<td>$' + (t.notional || 250).toFixed(0) + '</td>' +
+      '<td style="color:' + pnlClass + '">' + pnlSign + '$' + (t.pnl || 0).toFixed(2) + '</td>' +
+      '<td><span class="' + resultBadge + '">' + resultText + '</span> ' + (t.close_reason || '') + '</td>' +
+      '<td style="font-size:9px;color:var(--text-muted)">' + (t.close_time || '') + '</td>' +
+      '</tr>';
   }
   tbody.innerHTML = html;
 }
 
 // ─── Event Log ──────────────────────────────────────────────────
+
 function updateEventLog(events) {
   const container = document.getElementById('eventLog');
   let html = '';
-  for (const e of events) {
-    html += '<div class="log-entry">';
-    html += '<span class="log-time">' + e.time + '</span>';
-    html += '<span class="log-tag-' + e.tag + '">[' + e.tag + ']</span> ';
-    html += e.msg;
-    html += '</div>';
+  for (const e of (events || [])) {
+    html += '<div class="log-entry">' +
+      '<span class="log-time">' + e.time + '</span>' +
+      '<span class="log-tag-' + e.tag + '">[' + e.tag + ']</span> ' +
+      (e.msg || '') + '</div>';
   }
   container.innerHTML = html;
-  const scrollContainer = document.getElementById('eventLogContainer');
-  if (scrollContainer) scrollContainer.scrollTop = scrollContainer.scrollHeight;
+  const scrollC = document.getElementById('eventLogContainer');
+  if (scrollC) scrollC.scrollTop = scrollC.scrollHeight;
+}
+
+// ─── Symbol Add / Remove ────────────────────────────────────────
+
+async function addSymbol() {
+  const select = document.getElementById('symbolSelect');
+  const sym = select.value;
+  if (!sym) return;
+  showLoading('Adding ' + sym + '...');
+  try {
+    const resp = await fetch('/api/symbol/add', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: sym }),
+    });
+    const data = await resp.json();
+    if (data.status === 'ok') {
+      select.value = '';
+      await loadSymbolList();
+    } else { alert(data.message); }
+  } catch (e) { alert('Add failed: ' + e); }
+  hideLoading();
+}
+
+async function removeSymbol(sym) {
+  if (!confirm('Remove ' + sym + ' from active trading?')) return;
+  showLoading('Removing ' + sym + '...');
+  try {
+    const resp = await fetch('/api/symbol/remove', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: sym }),
+    });
+    const data = await resp.json();
+    if (data.status === 'ok') { await loadSymbolList(); }
+    else { alert(data.message); }
+  } catch (e) { alert('Remove failed: ' + e); }
+  hideLoading();
 }
 
 // ─── Reset ──────────────────────────────────────────────────────
+
 async function resetAll() {
   if (!confirm('Reset ALL accounts to $500 each? This clears ALL trade history.')) return;
   showLoading('Resetting all...');
-  try {
-    await fetch('/api/reset', { method: 'POST' });
-  } catch (e) { console.error('Reset error:', e); }
+  try { await fetch('/api/reset', { method: 'POST' }); } catch (e) {}
   hideLoading();
 }
 
 async function resetSymbol(sym) {
-  if (!confirm('Reset ' + sym + ' capital to $500? This clears trades for this symbol.')) return;
+  if (!confirm('Reset ' + sym + ' capital to $500?')) return;
   showLoading('Resetting ' + sym + '...');
-  try {
-    await fetch('/api/reset?symbol=' + sym, { method: 'POST' });
-  } catch (e) { console.error('Reset error:', e); }
+  try { await fetch('/api/reset?symbol=' + sym, { method: 'POST' }); } catch (e) {}
   hideLoading();
 }
 
-// ─── Loading UX ─────────────────────────────────────────────────
+// ─── Loading ────────────────────────────────────────────────────
+
 function showLoading(msg) {
   document.getElementById('loadingOverlay').classList.add('active');
   document.getElementById('loadingText').textContent = msg;
