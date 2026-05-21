@@ -61,7 +61,7 @@ def rsi(closes, period=14):
 
 
 def atr(highs, lows, closes, period=14):
-    """Average True Range."""
+    """Average True Range — returns with high precision for low-price assets."""
     if len(closes) < period + 1:
         return 0.0
     trs = []
@@ -75,7 +75,7 @@ def atr(highs, lows, closes, period=14):
     atr_val = sum(trs[:period]) / period
     for i in range(period, len(trs)):
         atr_val = (atr_val * (period - 1) + trs[i]) / period
-    return round(atr_val, 4)
+    return round(atr_val, 8)  # 8 decimals for low-price tokens (PEPE, SHIB, etc.)
 
 
 def macd(closes, fast=12, slow=26, signal=9):
@@ -94,5 +94,5 @@ def macd(closes, fast=12, slow=26, signal=9):
     if len(valid) < signal:
         return 0.0, 0.0, 0.0
     sig_ema = ema(valid, signal)
-    return (round(valid[-1], 4), round(sig_ema[-1], 4),
-            round(valid[-1] - sig_ema[-1], 4))
+    return (round(valid[-1], 8), round(sig_ema[-1], 8),
+            round(valid[-1] - sig_ema[-1], 8))

@@ -17,6 +17,14 @@ from app.indicators import atr
 from app.database import save_event as _save_event
 
 
+# ─── Dynamic decimal precision ──────────────────────────────────────────────
+def _dp(price):
+    """Pick decimal places for display."""
+    if price <= 0:
+        return 8
+    return 8 if price < 1.0 else 4
+
+
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
 def log_event(msg, level="INFO"):
@@ -117,13 +125,17 @@ def check_new_manipulation(sym):
     manipulation_candle[sym] = {
         "time": candle_time, "high": latest["high"], "low": latest["low"],
         "open": latest["open"], "close": latest["close"],
-        "direction": direction, "range": round(candle_range, 4),
+        "direction": direction, "range": round(candle_range, 8),
     }
     manipulation_active[sym] = True
     reversal_pattern[sym] = None
+    # Clear entry guard so new reversal signal can trigger a fresh trade
+    with state_lock:
+        signal_state[sym]["last_entry_signal"] = None
     log_event(
         f"[{sym}] MANIPULATION: {direction} spike | "
-        f"Range=${candle_range:.4f} (≥${threshold:.4f})", "SIGNAL")
+        f"Range=${candle_range:.{_dp(candle_range)}f} "
+        f"(≥${threshold:.{_dp(threshold)}f})", "SIGNAL")
     return manipulation_candle[sym]
 
 
@@ -143,7 +155,7 @@ def evaluate_signal_for_symbol(sym):
         c5_lo = [c["low"] for c in c5_for_atr]
         a5 = atr(c5_hi, c5_lo, c5_cl, 14)
         with state_lock:
-            indicators[sym]["5m_atr14"] = round(a5, 4)
+            indicators[sym]["5m_atr14"] = round(a5, 8)
 
     check_new_manipulation(sym)
 
@@ -184,7 +196,7 @@ def evaluate_signal_for_symbol(sym):
             direction = wick_dir
             trigger = c5[idx]["high"] if direction == 1 else c5[idx]["low"]
             pattern_found = {
-                "type": pattern_type, "trigger": round(trigger, 4),
+                "type": pattern_type, "trigger": round(trigger, 8),
                 "direction": direction, "candle_time": c5[idx]["time"],
             }
             break
@@ -198,7 +210,7 @@ def evaluate_signal_for_symbol(sym):
             last = c5[-1]
             trigger = last["high"] if direction == 1 else last["low"]
             pattern_found = {
-                "type": pattern_type, "trigger": round(trigger, 4),
+                "type": pattern_type, "trigger": round(trigger, 8),
                 "direction": direction, "candle_time": last["time"],
             }
 
@@ -214,19 +226,18 @@ def evaluate_signal_for_symbol(sym):
         with state_lock:
             signal_state[sym]["signal"] = "LONG" if direction == 1 else "SHORT"
             signal_state[sym]["direction"] = direction
-            signal_state[sym]["tp"] = round(tp, 4)
-            signal_state[sym]["sl"] = round(sl, 4)
-            signal_state[sym]["manipulation_range"] = round(manip_range, 4)
+            signal_state[sym]["tp"] = round(tp, 8)
+            signal_state[sym]["sl"] = round(sl, 8)
+            signal_state[sym]["manipulation_range"] = round(manip_range, 8)
             signal_state[sym]["pattern_type"] = pattern_type
         log_event(
             f"[{sym}] REVERSAL: {pattern_type} → "
             f"{'LONG' if direction == 1 else 'SHORT'} | "
-            f"TP=${tp:.4f} SL=${sl:.4f}", "SIGNAL")
+            f"TP=${tp:.{_dp(tp)}f} SL=${sl:.{_dp(sl)}f}", "SIGNAL")
 
-    # Reset last_entry_signal so execution engine can retry on each cycle
-    with state_lock:
-        if signal_state[sym].get("last_entry_signal") is not None:
-            signal_state[sym]["last_entry_signal"] = None
+    # Don't reset last_entry_signal here — execution loop owns the entry guard.
+    # Resetting it causes duplicate trade attempts on every strategy cycle
+    # when save_state() fails due to DB schema issues.
 
     # Expire stale manipulations (>2h)
     try:

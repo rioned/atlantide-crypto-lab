@@ -345,7 +345,7 @@ def api_reset():
     conn.execute("DELETE FROM open_trades")
     conn.execute("DELETE FROM symbol_capital")
     conn.commit()
-    conn.close()
+    # Don't close — connection is shared
     save_state()
     log_event(msg, "SYSTEM")
     return jsonify({"status": "ok", "message": msg})

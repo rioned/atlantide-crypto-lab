@@ -15,6 +15,14 @@ from app.state import (SYMBOLS, candles, ticker, daily_atr, daily_atr_threshold,
 from app.indicators import atr
 
 
+# ─── Dynamic decimal precision for low-price tokens ────────────────────────
+def _price_precision(price):
+    """Pick decimal places for display — 8 for sub-dollar, 4 otherwise."""
+    if price <= 0:
+        return 8
+    return 8 if price < 1.0 else 4
+
+
 # ─── Historical Bootstrap ─────────────────────────────────────────────────────
 
 def bootstrap_historical_candles(sym):
@@ -74,24 +82,59 @@ def compute_daily_atr(sym):
         if resp.status_code != 200:
             log_event(f"Daily ATR {sym} fetch failed: "
                       f"HTTP {resp.status_code}", "WARN")
-            return
+            return _fallback_atr(sym)
         data = resp.json()
         if len(data) < 15:
-            return
+            log_event(f"Daily ATR {sym}: only {len(data)} daily candles, "
+                      f"falling back to 15m calc", "WARN")
+            return _fallback_atr(sym)
         highs = [float(k[2]) for k in data]
         lows = [float(k[3]) for k in data]
         closes = [float(k[4]) for k in data]
         d_atr = atr(highs, lows, closes, 14)
+        if d_atr <= 0:
+            log_event(f"Daily ATR {sym} = 0, falling back to 15m calc", "WARN")
+            return _fallback_atr(sym)
         threshold = d_atr * MANIPULATION_THRESHOLD
-        daily_atr[sym] = d_atr
-        daily_atr_threshold[sym] = threshold
-        with state_lock:
-            indicators[sym]["daily_atr"] = round(d_atr, 4)
-            indicators[sym]["daily_atr_threshold"] = round(threshold, 4)
-        log_event(f"{sym} Daily ATR(14)=${d_atr:.4f} | "
-                  f"Threshold=${threshold:.4f}", "SYSTEM")
+        _set_atr(sym, d_atr, threshold)
+        return
     except Exception as e:
         log_event(f"Daily ATR {sym} error: {e}", "WARN")
+        _fallback_atr(sym)
+
+
+def _fallback_atr(sym):
+    """Compute ATR from bootstrapped 15m candles as fallback for low-price tokens."""
+    from app.strategy import log_event
+    with state_lock:
+        c15 = list(candles.get(sym, {}).get("15m", []))
+    if len(c15) < 15:
+        log_event(f"Fallback ATR {sym}: only {len(c15)} 15m candles, "
+                  f"need 15", "WARN")
+        return
+    highs = [c["high"] for c in c15]
+    lows = [c["low"] for c in c15]
+    closes = [c["close"] for c in c15]
+    # Compute ATR on 15m candles
+    atr_val = atr(highs, lows, closes, 14)
+    if atr_val <= 0:
+        log_event(f"Fallback ATR {sym} still 0", "WARN")
+        return
+    # Scale: 15m ATR ≈ daily ATR / sqrt(96) since there are 96 15m bars per day
+    daily_est = atr_val * (96 ** 0.5)
+    threshold = daily_est * MANIPULATION_THRESHOLD
+    _set_atr(sym, daily_est, threshold)
+    log_event(f"{sym} Daily ATR(14)=${daily_est:.{_price_precision(daily_est)}f} "
+              f"(from 15m fallback) | "
+              f"Threshold=${threshold:.{_price_precision(threshold)}f}", "SYSTEM")
+
+
+def _set_atr(sym, d_atr, threshold):
+    daily_atr[sym] = d_atr
+    daily_atr_threshold[sym] = threshold
+    with state_lock:
+        indicators[sym]["daily_atr"] = round(d_atr, 8)
+        indicators[sym]["daily_atr_threshold"] = round(threshold, 8)
 
 
 # ─── WebSocket Streamer ───────────────────────────────────────────────────────
@@ -216,7 +259,7 @@ def _run_ws_forever():
                                         on_error=on_error,
                                         on_close=on_close,
                                         on_open=on_open)
-            ws.run_forever(ping_interval=30, ping_timeout=10)
+            ws.run_forever(ping_interval=30, ping_timeout=20)
         except Exception as e:
             if ws_stop_event.is_set():
                 break

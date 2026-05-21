@@ -12,6 +12,14 @@ from app.database import save_closed_trade, save_state
 from app.strategy import log_event
 
 
+# ─── Dynamic decimal precision ──────────────────────────────────────────────
+def _dp(price):
+    """Pick decimal places for display."""
+    if price <= 0:
+        return 8
+    return 8 if price < 1.0 else 4
+
+
 def get_next_trade_id():
     global TRADE_ID_COUNTER
     with TRADE_ID_LOCK:
@@ -95,6 +103,8 @@ def execution_loop():
                                 closed_trades.pop(0)
                             if trade in open_trades[sym]:
                                 open_trades[sym].remove(trade)
+                            # Clear entry guard so a new signal can fire
+                            signal_state[sym]["last_entry_signal"] = None
 
                         save_closed_trade(trade, sym)
                         save_state()
@@ -103,11 +113,11 @@ def execution_loop():
                             f"[{sym}] TRADE {trade['id']} CLOSED "
                             f"({close_reason}): "
                             f"{'LONG' if trade['direction'] == 1 else 'SHORT'} "
-                            f"Entry=${trade['entry']:.4f} "
-                            f"Exit=${trade['exit_price']:.4f} "
-                            f"PnL=${trade['pnl']:.2f} | "
-                            f"Cap=${sym_cap.get('balance', 0):.2f}",
-                            "TRADE")
+                        f"Entry=${trade['entry']:.{_dp(trade['entry'])}f} "
+                        f"Exit=${trade['exit_price']:.{_dp(trade['exit_price'])}f} "
+                        f"PnL=${trade['pnl']:.2f} | "
+                        f"Cap=${sym_cap.get('balance', 0):.2f}",
+                        "TRADE")
 
                 # ── Open new trades on signal ──────────────────────────────
                 with state_lock:
@@ -155,8 +165,8 @@ def execution_loop():
                             "%Y-%m-%d %H:%M:%S"),
                         "entry": current_price,
                         "direction": direction,
-                        "tp": round(tp, 4),
-                        "sl": round(sl, 4),
+                        "tp": round(tp, 8),
+                        "sl": round(sl, 8),
                         "notional": round(notional, 2),
                         "margin": round(margin, 2),
                         "exit_price": None,
@@ -173,7 +183,8 @@ def execution_loop():
                     log_event(
                         f"[{sym}] TRADE {trade['id']} OPENED "
                         f"({current_sig}): "
-                        f"Entry=${current_price:.4f} TP=${tp:.4f} SL=${sl:.4f} "
+                        f"Entry=${current_price:.{_dp(current_price)}f} "
+                        f"TP=${tp:.{_dp(tp)}f} SL=${sl:.{_dp(sl)}f} "
                         f"Notional=${notional:.0f} Margin=${margin:.2f} "
                         f"Risk=${risk_amount:.2f} Pattern={pat}",
                         "TRADE")
