@@ -7,7 +7,8 @@ MAX_OPEN_TRADES_PER_SYMBOL = 5
 MANIPULATION_THRESHOLD = 0.05    # 5% of Daily ATR (was 20% — too strict for 15m crypto candles)
 JOHN_WICK_WICK_RATIO = 0.60      # >= 60% wick ratio
 POWER_TOWER_RETRACE = 0.30       # 30% retrace for engulfing
-TP_RANGE_PCT = 0.50              # 50% of manipulation range (1:2 RR via SL placement)
+RR_RATIO = 2.0                   # 1:2 risk-to-reward (risk 1 → make 2)
+TRADING_FEE = 0.0005             # 0.05% per trade (each side: entry + exit = 0.10% round-trip)
 CANDLE_LIMIT = 200
 MAX_EVENT_LOG = 200
 MAX_CLOSED_TRADES = 500

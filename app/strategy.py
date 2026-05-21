@@ -7,7 +7,7 @@ import threading
 from datetime import datetime, timedelta
 
 from app.config import (JOHN_WICK_WICK_RATIO, POWER_TOWER_RETRACE,
-                         TP_RANGE_PCT, MAX_EVENT_LOG)
+                         RR_RATIO, MAX_EVENT_LOG)
 from app.state import (SYMBOLS, candles, signal_state, daily_atr,
                         daily_atr_threshold, manipulation_candle,
                         manipulation_active, reversal_pattern,
@@ -219,10 +219,12 @@ def evaluate_signal_for_symbol(sym):
         reversal_pattern[sym] = pattern_found
         if direction == 1:
             sl = manip_low
-            tp = manip_low + manip_range * TP_RANGE_PCT
+            risk_distance = trigger - sl
+            tp = trigger + RR_RATIO * risk_distance  # 1:2 RR
         else:
             sl = manip_high
-            tp = manip_high - manip_range * TP_RANGE_PCT
+            risk_distance = sl - trigger
+            tp = trigger - RR_RATIO * risk_distance  # 1:2 RR
         with state_lock:
             signal_state[sym]["signal"] = "LONG" if direction == 1 else "SHORT"
             signal_state[sym]["direction"] = direction

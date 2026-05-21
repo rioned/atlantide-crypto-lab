@@ -4,7 +4,7 @@ import time
 from datetime import datetime
 
 from app.config import (RISK_PCT, LEVERAGE, MAX_OPEN_TRADES_PER_SYMBOL,
-                         MAX_CLOSED_TRADES)
+                         MAX_CLOSED_TRADES, TRADING_FEE)
 from app.state import (SYMBOLS, capital, capital_lock, state_lock,
                         signal_state, ticker, open_trades, closed_trades,
                         TRADE_ID_COUNTER, TRADE_ID_LOCK)
@@ -78,6 +78,16 @@ def execution_loop():
                         trade["exit_time"] = datetime.now().strftime(
                             "%Y-%m-%d %H:%M:%S")
                         trade["pnl"] = round(pnl_pct * notional, 2)
+
+                        # Apply 0.05% trading fees (entry + exit = 0.10% round-trip)
+                        entry_fee = trade.get("entry_fee", round(notional * TRADING_FEE, 2))
+                        exit_fee = round(abs(notional + trade["pnl"]) * TRADING_FEE, 2)
+                        total_fees = round(entry_fee + exit_fee, 2)
+                        trade["entry_fee"] = entry_fee
+                        trade["exit_fee"] = exit_fee
+                        trade["total_fees"] = total_fees
+                        trade["pnl"] = round(trade["pnl"] - total_fees, 2)
+
                         trade["reason"] = close_reason
 
                         # Update capital
@@ -115,7 +125,8 @@ def execution_loop():
                             f"{'LONG' if trade['direction'] == 1 else 'SHORT'} "
                         f"Entry=${trade['entry']:.{_dp(trade['entry'])}f} "
                         f"Exit=${trade['exit_price']:.{_dp(trade['exit_price'])}f} "
-                        f"PnL=${trade['pnl']:.2f} | "
+                        f"PnL=${trade['pnl']:.2f} "
+                        f"Fees=${trade['total_fees']:.2f} | "
                         f"Cap=${sym_cap.get('balance', 0):.2f}",
                         "TRADE")
 
@@ -169,6 +180,9 @@ def execution_loop():
                         "sl": round(sl, 8),
                         "notional": round(notional, 2),
                         "margin": round(margin, 2),
+                        "entry_fee": round(notional * TRADING_FEE, 2),
+                        "exit_fee": 0.0,
+                        "total_fees": 0.0,
                         "exit_price": None,
                         "exit_time": None,
                         "pnl": 0.0,
