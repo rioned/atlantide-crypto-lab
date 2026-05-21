@@ -1,24 +1,29 @@
 # ATLANTIDE CRYPTO LAB
 
-⚡ Dark cyberpunk leveraged paper trading simulator with dynamic symbol support.
+⚡ Dark cyberpunk leveraged paper trading simulator — Pattern Scalp strategy for crypto.
 
-**Stack:** Flask + Vanilla JS Canvas + Binance WebSocket (public, no API keys)
+**Stack:** Flask + Vanilla JS Canvas + Binance WebSocket (public market data only — no API keys)
+
+![Python](https://img.shields.io/badge/Python-3.13-%233776AB)
+![Flask](https://img.shields.io/badge/Flask-%23000)
+![GitHub last commit](https://img.shields.io/github/last-commit/rionedanny/atlantide-crypto-lab)
 
 ## Features
 
-- **100+ USDT pairs** — switch symbols dynamically via web GUI dropdown
-- **3-agent architecture** — WebSocket streamer, pure-Python strategy engine, simulated execution
-- **MTF confluence signals** — 1H EMA200 bias + 15M MACD trend + 5M EMA9/21 cross with RSI + volume spike
-- **5x leverage paper trading** — $50 margin per trade, $250 notional
-- **Auto TP/SL** — based on 2×/1× ATR(14)
-- **Persistent SQLite state** — balance, trade history, event log survive restarts
-- **Canvas candlestick chart** — 60 candles with EMA9/EMA21 overlays, TP/SL dashed lines
-- **RSI gauge, MACD panel, ATR, Volume indicators**
-- **Real-time WebSocket** — direct Binance stream, no polling, no API keys
+- **4 simultaneous symbols** — independent $500 capital pools, 10% risk per trade
+- **Pattern Scalp strategy** — 15m manipulation detection + 5m reversal patterns (John Wick, Power Tower)
+- **5× leverage paper trading** — position sized dynamically for 10% risk
+- **1:2 risk-reward** — TP at 50% of manipulation range, SL at candle extreme
+- **4 Market Sessions** — Asian, European, US, Australian with live countdowns + 10min pre-open notifications
+- **TradingView-style dark GUI** — canvas candlestick charts, EMA overlays, TP/SL lines
+- **SSE real-time streaming** — instant price updates via Server-Sent Events
+- **Persistent SQLite state** — balance, trades, logs survive restart (systemd managed)
+- **100+ available USDT pairs** — add/remove symbols dynamically via web UI
 
 ## Quick Start
 
 ```bash
+git clone https://github.com/rionedanny/atlantide-crypto-lab.git
 cd atlantide-crypto-lab
 python3 -m venv venv
 source venv/bin/activate
@@ -28,7 +33,35 @@ python app.py
 
 Open **http://localhost:8080**
 
-## systemd — Auto-start on boot
+## Architecture
+
+```
+app/
+├── config.py       Constants, sessions, 100+ symbols
+├── state.py        Global state + SSE broadcast
+├── database.py     SQLite persistence
+├── indicators.py   Pure Python indicators (SMA, EMA, RSI, ATR, MACD)
+├── market_data.py  Binance REST bootstrap + WebSocket streams
+├── strategy.py     Pattern Scalp: manipulation → reversal → entry
+├── execution.py    Trade lifecycle, PnL, position sizing
+├── sessions.py     Market session computation
+├── routes.py       Flask API + SSE /api/stream
+└── main.py         Startup orchestrator
+```
+
+## Pattern Scalp Strategy
+
+| Phase | Timeframe | Detection |
+|-------|-----------|-----------|
+| **1. Manipulation** | 15m | Candle range ≥ 5% of Daily ATR → liquidity sweep |
+| **2. Reversal** | 5m | John Wick (≥60% wick) or Power Tower (engulfing) |
+| **3. Entry** | Next 5m bar | Break of reversal candle's extreme |
+| **4. SL** | — | Manipulation candle's extreme |
+| **5. TP** | — | 50% of manipulation range (1:2 RR) |
+
+Risk: 10% of per-symbol capital per trade. 5× leverage. Max 5 concurrent per symbol.
+
+## systemd (auto-start on boot)
 
 ```bash
 sudo tee /etc/systemd/system/atlantide-crypto-lab.service << 'EOF'
@@ -51,37 +84,5 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-sudo systemctl daemon-reload
-sudo systemctl enable atlantide-crypto-lab
-sudo systemctl start atlantide-crypto-lab
-
-# Check status
-sudo systemctl status atlantide-crypto-lab
-
-# View logs
-sudo journalctl -u atlantide-crypto-lab -f
+sudo systemctl daemon-reload && sudo systemctl enable --now atlantide-crypto-lab
 ```
-
-## API Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/` | Dashboard |
-| GET | `/api/state` | Full state JSON (ticker, account, signals, trades, candles, indicators, logs) |
-| GET | `/api/symbols` | Available USDT pairs (top 100+) |
-| POST | `/api/symbol/set` | Switch symbol `{"symbol": "btc"}` |
-| POST | `/api/reset` | Reset account to $500 |
-
-## Signal Logic
-
-| Timeframe | Indicator | Condition |
-|-----------|-----------|-----------|
-| 1H | EMA200 | Price > EMA200 = BULLISH |
-| 15M | MACD(12,26,9) | Line > Signal = BULLISH |
-| 5M | EMA9/21 cross + RSI(14) + Vol | Cross up + RSI>50 + Vol>1.5×SMA = BULLISH |
-
-All three must align for LONG/SHORT signal. Otherwise WAITING.
-
-## Bot Health
-
-Used by the Atlantide AI Lab. No API keys required — public Binance WebSocket only.
