@@ -4,7 +4,7 @@ INITIAL_CAPITAL_PER_SYMBOL = 500.0
 RISK_PCT = 0.10          # 10% of symbol capital at risk per trade
 LEVERAGE = 5
 MAX_OPEN_TRADES_PER_SYMBOL = 5
-MANIPULATION_THRESHOLD = 0.20    # 20% of Daily ATR
+MANIPULATION_THRESHOLD = 0.05    # 5% of Daily ATR (was 20% — too strict for 15m crypto candles)
 JOHN_WICK_WICK_RATIO = 0.60      # >= 60% wick ratio
 POWER_TOWER_RETRACE = 0.30       # 30% retrace for engulfing
 TP_RANGE_PCT = 0.50              # 50% of manipulation range (1:2 RR via SL placement)

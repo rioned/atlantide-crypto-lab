@@ -96,11 +96,22 @@ def check_new_manipulation(sym):
     # Determine direction: which side got swept?
     open_to_high = latest["high"] - latest["open"]
     open_to_low = latest["open"] - latest["low"]
-    if latest["close"] < latest["open"] and open_to_low > open_to_high * 1.5:
-        direction = "DOWN"       # sweep below → reversal up
-    elif latest["close"] > latest["open"] and open_to_high > open_to_low * 1.5:
-        direction = "UP"         # sweep above → reversal down
-    else:
+    close_to_high = latest["high"] - latest["close"]
+    close_to_low = latest["close"] - latest["low"]
+    # Upper wick = move above open/close = liquidity sweep UP
+    # Lower wick = move below open/close = liquidity sweep DOWN
+    upper_wick = max(open_to_high, close_to_high)
+    lower_wick = max(open_to_low, close_to_low)
+    total_range = latest["high"] - latest["low"]
+    if total_range <= 0:
+        return None
+    upper_ratio = upper_wick / total_range
+    lower_ratio = lower_wick / total_range
+    if lower_ratio >= 0.55:       # at least 55% of range is lower wick → DOWN sweep
+        direction = "DOWN"
+    elif upper_ratio >= 0.55:     # at least 55% of range is upper wick → UP sweep
+        direction = "UP"
+    else:                         # ambiguous — use close direction
         direction = "UP" if latest["close"] > latest["open"] else "DOWN"
 
     manipulation_candle[sym] = {
@@ -211,6 +222,11 @@ def evaluate_signal_for_symbol(sym):
             f"[{sym}] REVERSAL: {pattern_type} → "
             f"{'LONG' if direction == 1 else 'SHORT'} | "
             f"TP=${tp:.4f} SL=${sl:.4f}", "SIGNAL")
+
+    # Reset last_entry_signal so execution engine can retry on each cycle
+    with state_lock:
+        if signal_state[sym].get("last_entry_signal") is not None:
+            signal_state[sym]["last_entry_signal"] = None
 
     # Expire stale manipulations (>2h)
     try:
