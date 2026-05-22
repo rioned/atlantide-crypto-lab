@@ -210,15 +210,24 @@ def on_message(ws, raw):
             is_closed = k.get("x", False)
             with state_lock:
                 c_list = candles[sym][tf]
-                c_list.append(candle)
-                seen = set()
-                deduped = []
-                for c in c_list:
-                    if c["time"] not in seen:
-                        seen.add(c["time"])
-                        deduped.append(c)
-                deduped.sort(key=lambda x: x["time"])
-                candles[sym][tf] = deduped[-CANDLE_LIMIT:]
+                # Replace existing candle at this time — keeps LATEST data (live high/low)
+                replaced = False
+                for i, c in enumerate(c_list):
+                    if c["time"] == candle["time"]:
+                        c_list[i] = candle
+                        replaced = True
+                        break
+                if not replaced:
+                    c_list.append(candle)
+                    # Remove exact duplicates (same time) from earlier WS ticks
+                    seen = set()
+                    deduped = []
+                    for c in c_list:
+                        if c["time"] not in seen:
+                            seen.add(c["time"])
+                            deduped.append(c)
+                    deduped.sort(key=lambda x: x["time"])
+                    candles[sym][tf] = deduped[-CANDLE_LIMIT:]
             # Broadcast SSE kline update
             broadcast_sse({
                 "event": "kline",
@@ -239,9 +248,6 @@ def on_error(ws, error):
 def on_close(ws, code, msg):
     from app.strategy import log_event
     log_event(f"WebSocket closed (code={code}). Reconnecting in 5s...", "WARN")
-    time.sleep(5)
-    if not ws_stop_event.is_set():
-        _run_ws_forever()
 
 
 def on_open(ws):
@@ -260,6 +266,8 @@ def _run_ws_forever():
                                         on_close=on_close,
                                         on_open=on_open)
             ws.run_forever(ping_interval=30, ping_timeout=20)
+            # After graceful close, wait before reconnect
+            time.sleep(5)
         except Exception as e:
             if ws_stop_event.is_set():
                 break

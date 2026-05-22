@@ -88,7 +88,12 @@ def check_new_manipulation(sym):
         return None
     latest = c15[-1]
     candle_time = latest["time"]
-    if candle_time == last_15m_time.get(sym):
+    # Only process if this candle hasn't been processed yet
+    manip = manipulation_candle.get(sym)
+    if manip is not None and manip.get("time") == candle_time:
+        return None
+    # Also skip if we've already seen this exact candle time
+    if last_15m_time.get(sym) == candle_time:
         return None
     last_15m_time[sym] = candle_time
     candle_range = latest["high"] - latest["low"]
@@ -96,12 +101,11 @@ def check_new_manipulation(sym):
     if threshold <= 0:
         return None
     if candle_range < threshold:
-        manipulation_active[sym] = False
-        manipulation_candle[sym] = None
-        reversal_pattern[sym] = None
+        if manipulation_active.get(sym):
+            manipulation_active[sym] = False
+            manipulation_candle[sym] = None
+            reversal_pattern[sym] = None
         return None
-
-    # Determine direction: which side got swept?
     open_to_high = latest["high"] - latest["open"]
     open_to_low = latest["open"] - latest["low"]
     close_to_high = latest["high"] - latest["close"]
@@ -225,17 +229,24 @@ def evaluate_signal_for_symbol(sym):
             sl = manip_high
             risk_distance = sl - trigger
             tp = trigger - RR_RATIO * risk_distance  # 1:2 RR
+        signal_label = "LONG" if direction == 1 else "SHORT"
+        # Only log/set if signal actually changed — prevents 2-second spam
         with state_lock:
-            signal_state[sym]["signal"] = "LONG" if direction == 1 else "SHORT"
-            signal_state[sym]["direction"] = direction
-            signal_state[sym]["tp"] = round(tp, 8)
-            signal_state[sym]["sl"] = round(sl, 8)
-            signal_state[sym]["manipulation_range"] = round(manip_range, 8)
-            signal_state[sym]["pattern_type"] = pattern_type
-        log_event(
-            f"[{sym}] REVERSAL: {pattern_type} → "
-            f"{'LONG' if direction == 1 else 'SHORT'} | "
-            f"TP=${tp:.{_dp(tp)}f} SL=${sl:.{_dp(sl)}f}", "SIGNAL")
+            old = signal_state[sym]
+            already_set = (old["signal"] == signal_label
+                           and abs(old["tp"] - tp) < 1e-8
+                           and abs(old["sl"] - sl) < 1e-8)
+            if not already_set:
+                signal_state[sym]["signal"] = signal_label
+                signal_state[sym]["direction"] = direction
+                signal_state[sym]["tp"] = round(tp, 8)
+                signal_state[sym]["sl"] = round(sl, 8)
+                signal_state[sym]["manipulation_range"] = round(manip_range, 8)
+                signal_state[sym]["pattern_type"] = pattern_type
+                log_event(
+                    f"[{sym}] REVERSAL: {pattern_type} → "
+                    f"{signal_label} | "
+                    f"TP=${tp:.{_dp(tp)}f} SL=${sl:.{_dp(sl)}f}", "SIGNAL")
 
     # Don't reset last_entry_signal here — execution loop owns the entry guard.
     # Resetting it causes duplicate trade attempts on every strategy cycle
