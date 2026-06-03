@@ -1,15 +1,15 @@
 [Unit]
-Description=ATLANTIDE CRYPTO LAB — SOL/USDT Paper Trading Simulator
+Description=CRYPTO LAB 2 — Multi-Symbol Pattern Scalp Simulator (15m, 1:2 RR)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=openclaw
-WorkingDirectory=/home/openclaw/workspace/atlantide-crypto-lab
-ExecStart=/home/openclaw/workspace/atlantide-crypto-lab/venv/bin/python /home/openclaw/workspace/atlantide-crypto-lab/app.py
+WorkingDirectory=/home/openclaw/workspace/crypto-lab2
+ExecStart=/home/openclaw/workspace/crypto-lab2/venv/bin/python3 -m gunicorn -k gthread -w 1 --threads 4 --bind 0.0.0.0:9090 --timeout 120 --keep-alive 30 wsgi:app
 Restart=always
-RestartSec=10
+RestartSec=5
 StandardOutput=journal
 StandardError=journal
 Environment=PYTHONUNBUFFERED=1

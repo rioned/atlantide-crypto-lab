@@ -1,30 +1,26 @@
-# ATLANTIDE CRYPTO LAB
+# CRYPTO LAB 2
 
-⚡ Dark cyberpunk leveraged paper trading simulator — Pattern Scalp strategy for crypto.
+⚡ Self-learning pattern scalp paper trading simulator — 15m timeframe, 1:2 RR, John Wick / Power Tower entries.
 
-**Stack:** Flask + Vanilla JS Canvas + Binance WebSocket (public market data only — no API keys)
-
-![Python](https://img.shields.io/badge/Python-3.13-%233776AB)
-![Flask](https://img.shields.io/badge/Flask-%23000)
-![GitHub last commit](https://img.shields.io/github/last-commit/rionedanny/atlantide-crypto-lab)
+**Stack:** Flask + Vanilla JS + Binance WebSocket (public market data only — no API keys)
 
 ## Features
 
 - **4 simultaneous symbols** — independent $500 capital pools, 10% risk per trade
-- **Pattern Scalp strategy** — 15m manipulation detection + 5m reversal patterns (John Wick, Power Tower)
+- **Pattern Scalp strategy** — 15m manipulation detection + 15m reversal patterns (John Wick, Power Tower)
 - **5× leverage paper trading** — position sized dynamically for 10% risk
-- **1:2 risk-reward** — TP at 50% of manipulation range, SL at candle extreme
-- **4 Market Sessions** — Asian, European, US, Australian with live countdowns + 10min pre-open notifications
-- **TradingView-style dark GUI** — canvas candlestick charts, EMA overlays, TP/SL lines
+- **1:2 risk-reward** — adaptive RR ratio tuned by self-learning engine
+- **Self-Improving AI Agent** — scores every trade, reviews every 20 trades, changes ONE parameter at a time (scientific method)
+- **Dark terminal GUI** — self-learning sidebar with goal progress bars (Sharpe, win rate, return, drawdown)
 - **SSE real-time streaming** — instant price updates via Server-Sent Events
-- **Persistent SQLite state** — balance, trades, logs survive restart (systemd managed)
+- **Persistent SQLite state** — balance, trades, logs survive restart
 - **100+ available USDT pairs** — add/remove symbols dynamically via web UI
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/rionedanny/atlantide-crypto-lab.git
-cd atlantide-crypto-lab
+git clone https://github.com/rionedanny/crypto-lab2.git
+cd crypto-lab2
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt

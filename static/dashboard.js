@@ -1,739 +1,664 @@
-/* ════════════════════════════════════════════════════════════════════════════
-   ATLANTIDE CRYPTO LAB — Professional Dashboard JS
-   SSE streaming | Price flash | TradingView-inspired | Fluid grid
-   ════════════════════════════════════════════════════════════════════════════ */
+/* CRYPTO LAB 2 v3 — Self-Learning Trading Dashboard */
+(function() {
+  'use strict';
 
-let symOrder = [];
-let allSymbols = [];
-let userTzOffset = 0;
-let notifiedSessions = {};
-let sessionTimers = {};
-let eventSource = null;
-let lastPrices = {};       // sym → price (for flash detection)
-let lastState = null;      // cached /api/state for fallback
-let stateTimer = null;
-// Chart data lives independently — SSE owns it, never overwritten by poll
-let liveCandles = {};      // sym → { "5m": [...], "15m": [...] }
-let liveManip = {};        // sym → manipulation dict
-let liveSignal = {};       // sym → signal_state dict
-let sseReconnectTimer = null;
+  let state = null;
+  let eventSource = null;
+  let clockInterval = null;
+  let lastPing = Date.now();
 
-// ─── Init ────────────────────────────────────────────────────────
-
-async function init() {
-  userTzOffset = -(new Date().getTimezoneOffset() / 60);
-  await requestNotificationPermission();
-  await loadSymbolList();
-
-  // Initial full state load
-  const resp = await fetch('/api/state?tz=' + userTzOffset);
-  if (resp.ok) {
-    lastState = await resp.json();
-    renderFull(lastState);
+  // ── Init ────────────────────────────────────────────────────────────────
+  function init() {
+    fetchState();
+    fetchMarketSessions();
+    fetchAllSymbols();
+    clockInterval = setInterval(updateClock, 1000);
+    setInterval(fetchMarketSessions, 30000);  // refresh market sessions every 30s
   }
 
-  document.getElementById('loadingOverlay').classList.remove('active');
-
-  // Open SSE stream for real-time updates
-  connectSSE();
-
-  // Fallback: poll every 5s for non-SSE data (sessions, trades, logs)
-  stateTimer = setInterval(pollState, 5000);
-
-  // Clock ticker
-  setInterval(() => {
-    const now = new Date();
-    document.getElementById('clock').textContent = now.toTimeString().split(' ')[0];
-  }, 1000);
-}
-
-// ─── SSE Streaming ──────────────────────────────────────────────
-
-function connectSSE() {
-  if (sseReconnectTimer) { clearTimeout(sseReconnectTimer); sseReconnectTimer = null; }
-  if (eventSource) { eventSource.close(); eventSource = null; }
-
-  eventSource = new EventSource('/api/stream');
-
-  eventSource.addEventListener('connected', () => {
-    console.log('SSE connected');
-    document.getElementById('livePill').textContent = '● LIVE';
-    document.getElementById('livePill').style.background = 'var(--green-bg)';
-    document.getElementById('livePill').style.color = 'var(--green)';
-  });
-
-  eventSource.addEventListener('ticker', (e) => {
-    try { const data = JSON.parse(e.data); handleTickerUpdate(data); } catch (_) {}
-  });
-
-  eventSource.addEventListener('kline', (e) => {
-    try { const data = JSON.parse(e.data); handleKlineUpdate(data); } catch (_) {}
-  });
-
-  eventSource.addEventListener('ping', () => { /* heartbeat */ });
-
-  eventSource.onerror = () => {
-    if (eventSource) { eventSource.close(); eventSource = null; }
-    document.getElementById('livePill').textContent = '○ RECONNECTING';
-    document.getElementById('livePill').style.background = 'var(--yellow-bg)';
-    document.getElementById('livePill').style.color = 'var(--yellow)';
-    sseReconnectTimer = setTimeout(connectSSE, 3000);
-  };
-}
-
-// ─── Real-time Handlers ─────────────────────────────────────────
-
-function handleTickerUpdate(data) {
-  const sym = data.symbol;
-  const price = data.price;
-  const prevPrice = lastPrices[sym] || price;
-
-  // Update price display with flash
-  const priceEl = document.getElementById('price-' + sym);
-  if (priceEl) {
-    const priceDec = price > 1000 ? 2 : price > 1 ? 4 : 6;
-    priceEl.textContent = '$' + price.toFixed(priceDec);
-
-    // Flash animation
-    if (price > prevPrice) {
-      priceEl.classList.remove('flash-down');
-      priceEl.classList.add('flash-up');
-      setTimeout(() => priceEl.classList.remove('flash-up'), 400);
-      priceEl.style.color = 'var(--green)';
-    } else if (price < prevPrice) {
-      priceEl.classList.remove('flash-up');
-      priceEl.classList.add('flash-down');
-      setTimeout(() => priceEl.classList.remove('flash-down'), 400);
-      priceEl.style.color = 'var(--red)';
-    }
+  function fetchState() {
+    const tz = -new Date().getTimezoneOffset() / 60;
+    fetch(`/api/state?tz=${tz}`)
+      .then(r => r.json())
+      .then(s => {
+        state = s;
+        render();
+        document.getElementById('loadingOverlay').classList.add('hidden');
+        connectSSE();
+      })
+      .catch(err => {
+        document.getElementById('loadingText').textContent = 'Connecting...';
+        setTimeout(fetchState, 2000);
+      });
   }
 
-  // Update change %
-  const chgEl = document.getElementById('change-' + sym);
-  if (chgEl && data.change_pct !== undefined) {
-    const chg = data.change_pct;
-    const chgClass = chg >= 0 ? 'var(--green)' : 'var(--red)';
-    chgEl.textContent = (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%';
-    chgEl.style.color = chgClass;
-  }
-
-  lastPrices[sym] = price;
-}
-
-function handleKlineUpdate(data) {
-  const sym = data.symbol;
-  const tf = data.tf;
-  if (!data.is_closed || !tf) return;
-
-  // Initialize live chart state for this symbol if needed
-  if (!liveCandles[sym]) liveCandles[sym] = { "5m": [], "15m": [] };
-  if (!liveCandles[sym][tf]) liveCandles[sym][tf] = [];
-
-  const clist = liveCandles[sym][tf];
-  // Dedup by time — the WS may resend the last closed candle
-  const existingIdx = clist.findIndex(c => c.time === data.candle.time);
-  if (existingIdx >= 0) {
-    clist[existingIdx] = data.candle;  // Update with final OHLCV
-  } else {
-    clist.push(data.candle);
-  }
-  // Sort by time, trim to 60
-  clist.sort((a, b) => (a.time || '').localeCompare(b.time || ''));
-  if (clist.length > 60) clist.splice(0, clist.length - 60);
-  liveCandles[sym][tf] = clist;
-
-  // Redraw 5m chart (primary display)
-  if (tf === '5m' || tf === '15m') {
-    drawMiniChart(sym, liveCandles[sym]['5m'] || [], liveManip[sym], liveSignal[sym] || {});
-  }
-}
-
-// ─── Poll state for non-SSE data ────────────────────────────────
-
-async function pollState() {
-  try {
-    const resp = await fetch('/api/state?tz=' + userTzOffset);
-    if (!resp.ok) return;
-    const fresh = await resp.json();
-
-    // Merge server signal/manipulation data into live state
-    const syms = fresh.symbols || [];
-    const data = fresh.data || {};
-    let chartChanged = false;
-    for (const sym of syms) {
-      const d = data[sym] || {};
-      liveManip[sym] = d.manipulation;
-      liveSignal[sym] = d.signal_state;
-
-      // If SSE hasn't populated candles yet, seed from server
-      if (!liveCandles[sym] || !liveCandles[sym]['5m'] || liveCandles[sym]['5m'].length === 0) {
-        if (!liveCandles[sym]) liveCandles[sym] = {};
-        liveCandles[sym]['5m'] = d.candles_5m || [];
-        liveCandles[sym]['15m'] = d.candles_15m || [];
-        chartChanged = true;
-      }
-    }
-
-    // Redraw all charts every poll — safety net if SSE stalls
-    for (const sym of syms) {
-      drawMiniChart(sym, liveCandles[sym]?.['5m'] || [], liveManip[sym], liveSignal[sym] || {});
-    }
-
-    lastState = fresh;
-    updateTopbarStats(fresh.account);
-    updateSessions(fresh.market_sessions);
-    updateClosedTrades(fresh.closed_trades);
-    updateEventLog(fresh.event_log);
-  } catch (e) { /* silent */ }
-}
-
-// ─── Full Render ─────────────────────────────────────────────────
-
-function renderFull(state) {
-  updateTopbarStats(state.account);
-  updateSessions(state.market_sessions);
-  updateSelector(state);
-
-  // Initialize live chart state from server snapshot
-  liveCandles = {};
-  liveManip = {};
-  liveSignal = {};
-  const syms = state.symbols || [];
-  const data = state.data || {};
-  for (const sym of syms) {
-    const d = data[sym] || {};
-    liveCandles[sym] = {
-      '5m': d.candles_5m || [],
-      '15m': d.candles_15m || []
+  // ── SSE ─────────────────────────────────────────────────────────────────
+  function connectSSE() {
+    if (eventSource) eventSource.close();
+    eventSource = new EventSource('/api/stream');
+    eventSource.onmessage = function() {};
+    eventSource.addEventListener('ticker', e => handleSSE('ticker', e.data));
+    eventSource.addEventListener('kline', e => handleSSE('kline', e.data));
+    eventSource.addEventListener('update', e => handleSSE('update', e.data));
+    eventSource.addEventListener('ping', () => { lastPing = Date.now(); });
+    eventSource.addEventListener('market_alert', e => handleMarketAlert(e.data));
+    eventSource.onerror = function() {
+      eventSource.close();
+      setTimeout(connectSSE, 3000);
     };
-    liveManip[sym] = d.manipulation;
-    liveSignal[sym] = d.signal_state || {};
   }
 
-  buildSymbolPanels(state);
-  updateClosedTrades(state.closed_trades);
-  updateEventLog(state.event_log);
-  document.getElementById('symCount').textContent =
-    (state.symbols || []).length + ' symbols';
-
-  // Track initial prices for flash detection
-  for (const sym of syms) {
-    const d = data[sym] || {};
-    const tick = d.ticker || {};
-    if (tick.price) lastPrices[sym] = tick.price;
-  }
-}
-
-// ─── Top Bar Stats ───────────────────────────────────────────────
-
-function updateTopbarStats(acct) {
-  if (!acct) return;
-  const pnl = acct.total_pnl || 0;
-  const pnlClass = pnl >= 0 ? 'var(--green)' : 'var(--red)';
-  const pnlSign = pnl >= 0 ? '+' : '';
-
-  document.getElementById('topbarStats').innerHTML =
-    '<div class="topbar-stat">' +
-    '<div class="label">Balance</div>' +
-    '<div class="value" style="color:' + pnlClass + '">$' + (acct.balance || 0).toFixed(2) + '</div>' +
-    '</div>' +
-    '<div class="topbar-stat">' +
-    '<div class="label">PnL</div>' +
-    '<div class="value" style="color:' + pnlClass + '">' + pnlSign + '$' + pnl.toFixed(2) + '</div>' +
-    '</div>' +
-    '<div class="topbar-stat">' +
-    '<div class="label">Win Rate</div>' +
-    '<div class="value" style="color:var(--text-primary)">' + (acct.winrate || 0).toFixed(1) + '%</div>' +
-    '</div>' +
-    '<div class="topbar-stat">' +
-    '<div class="label">Trades</div>' +
-    '<div class="value" style="color:var(--text-primary)">' + (acct.total_trades || 0) + '</div>' +
-    '</div>' +
-    '<div class="topbar-stat">' +
-    '<div class="label">Max DD</div>' +
-    '<div class="value" style="color:var(--red)">-' + (acct.max_drawdown || 0).toFixed(2) + '%</div>' +
-    '</div>';
-}
-
-// ─── Sessions ───────────────────────────────────────────────────
-
-function updateSessions(sessions) {
-  if (!sessions || sessions.length === 0) return;
-
-  for (const id of Object.keys(sessionTimers)) {
-    clearInterval(sessionTimers[id]);
-    delete sessionTimers[id];
+  function handleSSE(type, raw) {
+    try { var data = JSON.parse(raw); } catch(e) { return; }
+    if (type === 'ticker' || type === 'kline' || type === 'update') {
+      refreshState();
+    }
   }
 
-  let html = '';
-  for (const s of sessions) {
-    let countdownSec = s.is_open ? s.time_until_close : s.time_until_open;
-    const display = formatCountdown(Math.max(0, countdownSec));
-    const isAlert = !s.is_open && countdownSec <= 600 && countdownSec > 0;
+  function handleMarketAlert(raw) {
+    try {
+      var data = JSON.parse(raw);
+    } catch(e) { return; }
+    var eventLabel = data.event_type === 'open' ? 'opens' : 'closes';
+    var mins = Math.floor((data.seconds_until || 600) / 60);
+    var secs = (data.seconds_until || 600) % 60;
+    var timeStr = mins > 0 ? mins + 'm ' + secs + 's' : secs + 's';
+    toast(data.flag + ' ' + data.market + ' ' + eventLabel + ' in ' + timeStr, 'info');
+    // Refresh market sessions so the UI updates immediately
+    fetchMarketSessions();
+  }
 
-    let cardClass = '', countClass = 'IDLE', badgeClass = 'CLOSED', badgeText = 'CLOSED';
+  let refreshTimer = null;
+  let marketSessionsData = [];  // cached market session data
 
-    if (s.is_open) {
-      cardClass = 'OPEN'; countClass = 'OPEN';
-      badgeClass = 'OPEN'; badgeText = '● OPEN';
-      notifiedSessions[s.id] = false;
-    } else if (isAlert) {
-      cardClass = 'ALERT'; countClass = 'ALERT';
-      badgeClass = 'UPCOMING'; badgeText = '⏰ SOON';
-    } else {
-      badgeClass = 'UPCOMING'; badgeText = 'UPCOMING';
+  function refreshState() {
+    if (refreshTimer) return;
+    refreshTimer = setTimeout(() => {
+      refreshTimer = null;
+      const tz = -new Date().getTimezoneOffset() / 60;
+      fetch(`/api/state?tz=${tz}`)
+        .then(r => r.json())
+        .then(s => { state = s; renderQuick(); })
+        .catch(() => {});
+    }, 1000);
+  }
+
+  // ── Clock ───────────────────────────────────────────────────────────────
+  function updateClock() {
+    const now = new Date();
+    document.getElementById('clock').textContent = now.toLocaleTimeString('en-US', {hour12: false});
+    renderMarketSessionCountdowns();
+  }
+
+  // ── Market Sessions ──────────────────────────────────────────────────────
+  function fetchMarketSessions() {
+    fetch('/api/market-sessions')
+      .then(r => r.json())
+      .then(data => {
+        marketSessionsData = data;
+        renderMarketSessions();
+      })
+      .catch(() => {});
+  }
+
+  function renderMarketSessions() {
+    if (!marketSessionsData || marketSessionsData.length === 0) return;
+    const grid = document.getElementById('marketSessionsGrid');
+    if (!grid) return;
+
+    document.getElementById('marketSessionTime').textContent =
+      'Local · ' + (marketSessionsData[0] ? marketSessionsData[0].local_time : '');
+
+    grid.innerHTML = marketSessionsData.map(m => {
+      const secs = m.seconds_until_next;
+      let countdownStr = formatCountdown(secs);
+      let statusHTML;
+      let statusClass;
+
+      if (m.is_open) {
+        statusClass = 'session-open';
+        statusHTML = `<span class="session-dot session-dot-open"></span> Open <span class="session-closes-text">· closes ${countdownStr}</span>`;
+      } else if (m.next_event_type === 'open') {
+        statusClass = 'session-closed';
+        if (secs <= 600) {
+          statusClass = 'session-opening';
+          statusHTML = `<span class="session-dot session-dot-opening"></span> Opens <span class="session-opens-text">${countdownStr}</span>`;
+        } else {
+          statusHTML = `<span class="session-dot session-dot-closed"></span> Closed · opens ${countdownStr}`;
+        }
+      } else {
+        statusClass = 'session-closed';
+        statusHTML = `<span class="session-dot session-dot-closed"></span> Closed · ${countdownStr}`;
+      }
+
+      return `<div class="session-card ${statusClass}">
+        <div class="session-header">
+          <span class="session-flag">${m.flag || ''}</span>
+          <span class="session-name">${m.name}</span>
+          <span class="session-tz">${m.tz.split('/').pop()}</span>
+        </div>
+        <div class="session-body">
+          <div class="session-status">${statusHTML}</div>
+          <div class="session-schedule">${m.session_name || (m.sessions ? m.sessions.map(s => s[0]+'–'+s[1]).join(' / ') : '')}</div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  function renderMarketSessionCountdowns() {
+    if (!marketSessionsData || marketSessionsData.length === 0) return;
+    const cards = document.querySelectorAll('.session-card');
+    marketSessionsData.forEach((m, i) => {
+      const card = cards[i];
+      if (!card) return;
+      const secs = m.seconds_until_next;
+      const statusEl = card.querySelector('.session-status');
+      if (!statusEl) return;
+
+      if (m.is_open) {
+        const closeText = statusEl.querySelector('.session-closes-text');
+        if (closeText) closeText.textContent = '· closes ' + formatCountdown(secs);
+      } else if (m.next_event_type === 'open') {
+        const opensText = statusEl.querySelector('.session-opens-text');
+        if (opensText) opensText.textContent = formatCountdown(secs);
+        // Re-dot if within 10 min
+        const dot = statusEl.querySelector('.session-dot');
+        if (dot && secs <= 600) {
+          dot.className = 'session-dot session-dot-opening';
+          card.className = 'session-card session-opening';
+        }
+      }
+    });
+  }
+
+  function formatCountdown(secs) {
+    if (secs <= 0) return 'now';
+    if (secs < 60) return secs + 's';
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) {
+      const s = secs % 60;
+      return `${mins}m${s > 0 ? ' ' + s + 's' : ''}`;
+    }
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return `${h}h ${m}m`;
+  }
+
+  // ── Render ──────────────────────────────────────────────────────────────
+  function render() {
+    if (!state) return;
+    renderTopbar();
+    renderSelector();
+    renderSymbols();
+    renderOpenPositions();
+    renderClosedTrades();
+    renderLog();
+    renderLearnPanel();
+  }
+
+  function renderQuick() {
+    if (!state) return;
+    renderTopbar();
+    renderSymbolsQuick();
+    renderOpenPositions();
+    renderLearnPanel();
+  }
+
+  // ── Topbar ──────────────────────────────────────────────────────────────
+  function renderTopbar() {
+    const a = state.account || {};
+    const el = document.getElementById('topbarStats');
+    el.innerHTML = `
+      <span class="stat-pill">Bal <span class="num">$${a.balance||0}</span></span>
+      <span class="stat-pill">PnL <span class="num" style="color:${(a.total_pnl||0)>=0?'var(--green)':'var(--red)'}">$${a.total_pnl||0}</span></span>
+      <span class="stat-pill">WR <span class="num">${a.winrate||0}%</span></span>
+      <span class="stat-pill">DD <span class="num">${a.max_drawdown||0}%</span></span>
+      <span class="stat-pill">Trades <span class="num">${a.total_trades||0}</span></span>
+    `;
+    document.getElementById('symCount').textContent = `· ${(state.symbols||[]).length} sym`;
+  }
+
+  // ── Selector ────────────────────────────────────────────────────────────
+  function renderSelector() {
+    const chips = document.getElementById('activeChips');
+    const select = document.getElementById('symbolSelect');
+    chips.innerHTML = (state.symbols||[]).map(sym => `
+      <span class="chip active" onclick="removeSymbol('${sym}')" title="Click to remove ${sym}">${sym.replace('USDT','')} ✕</span>
+    `).join('');
+    select.innerHTML = '<option value="">+ Add Symbol</option>';
+    // Populate from /api/symbols data (all 100 symbols) for adding new ones
+    if (window.allSymbols && window.allSymbols.length > 0) {
+      window.allSymbols.forEach(item => {
+        if (!item.active) {
+          select.innerHTML += `<option value="${item.code}">${item.display}</option>`;
+        }
+      });
+    }
+  }
+
+  function fetchAllSymbols() {
+    fetch('/api/symbols')
+      .then(r => r.json())
+      .then(data => {
+        window.allSymbols = data;
+        renderSelector();
+      })
+      .catch(() => {});
+  }
+
+  // ── Symbols ─────────────────────────────────────────────────────────────
+  function symbolPanelHTML(sym, d) {
+    const t = d.ticker || {};
+    const sig = d.signal_state || {};
+    const cap = d.capital || {};
+    const ind = d.indicators || {};
+    const mp = d.manipulation;
+    const openTrades = d.open_trades || [];
+    const price = t.price || 0;
+    const chg = t.change_pct || 0;
+    const chgClass = chg >= 0 ? 'positive' : 'negative';
+    const chgSign = chg >= 0 ? '+' : '';
+
+    const capPct = cap.initial > 0 ? ((cap.balance - cap.initial) / cap.initial * 100).toFixed(1) : '0.0';
+    const capClass = cap.balance >= cap.initial ? 'green' : 'red';
+
+    const trend = ind.trend || '';
+    const vol = ind.vol_label || '';
+    const rsi = ind.rsi || '';
+    const atr = ind['15m_atr14'] || 0;
+
+    return `
+      <div class="sym-panel" id="panel-${sym}">
+        <div class="sym-header">
+          <span class="sym-name">${d.display||sym}</span>
+          <span>
+            <span class="sym-price">$${price.toFixed(price < 1 ? 6 : 2)}</span>
+            <span class="sym-change ${chgClass}">${chgSign}${chg.toFixed(2)}%</span>
+          </span>
+        </div>
+        <div class="sym-body">
+          <div class="sym-row"><span class="sym-label">Signal</span><span class="sym-val ${sig.signal ? (sig.signal === 'LONG' ? 'green' : 'red') : ''}">${sig.signal || '—'} ${sig.pattern_type ? '('+sig.pattern_type+')' : ''}</span></div>
+          <div class="sym-row"><span class="sym-label">Score / TP / SL</span><span class="sym-val">${sig.score ? 's='+sig.score : ''} ${sig.tp ? '$'+sig.tp.toFixed(sig.tp < 1 ? 6 : 2) : '—'} / ${sig.sl ? '$'+sig.sl.toFixed(sig.sl < 1 ? 6 : 2) : '—'}</span></div>
+          <div class="sym-row"><span class="sym-label">Regime / Vol</span><span class="sym-val">${trend||'—'} ${vol||''}</span></div>
+          <div class="sym-row"><span class="sym-label">ATR / RSI</span><span class="sym-val">$${atr.toFixed(atr < 1 ? 6 : 2)} / ${rsi}</span></div>
+          <div class="sym-row"><span class="sym-label">Capital</span><span class="sym-val ${capClass}">$${cap.balance.toFixed(2)} (${capPct}%)</span></div>
+          <div class="sym-row"><span class="sym-label">Open trades</span><span class="sym-val">${openTrades.length} (Unr. PnL: $${d.open_pnl||0})</span></div>
+          ${openTrades.length > 0 ? openTrades.map(t => `
+            <div class="sym-row" style="padding-left:12px;font-size:9px;">
+              <span class="sym-label">#${t.id} ${t.side} <span style="color:${t.unrealized_pnl >= 0 ? 'var(--green)' : 'var(--red)'}">${t.unrealized_pnl >= 0 ? '+' : ''}$${t.unrealized_pnl.toFixed(2)}</span></span>
+              <span class="sym-val">Entry $${t.entry_price.toFixed(t.entry_price < 1 ? 6 : 2)}</span>
+            </div>
+          `).join('') : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderSymbols() {
+    const grid = document.getElementById('symbolGrid');
+    if (!state.data) return;
+    grid.innerHTML = (state.symbols||[]).map(sym => {
+      const d = state.data[sym];
+      return d ? symbolPanelHTML(sym, d) : '';
+    }).join('');
+  }
+
+  function renderSymbolsQuick() {
+    if (!state.data) return;
+    (state.symbols||[]).forEach(sym => {
+      const d = state.data[sym];
+      if (!d) return;
+      const panel = document.getElementById(`panel-${sym}`);
+      if (!panel) { renderSymbols(); return; }
+      const price = d.ticker.price || 0;
+      const pr = panel.querySelector('.sym-price');
+      if (pr) pr.textContent = `$${price.toFixed(price < 1 ? 6 : 2)}`;
+      const chg = d.ticker.change_pct || 0;
+      const c = panel.querySelector('.sym-change');
+      if (c) {
+        c.textContent = `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%`;
+        c.className = `sym-change ${chg >= 0 ? 'positive' : 'negative'}`;
+      }
+    });
+  }
+
+  // ── Open Positions ─────────────────────────────────────────────────────
+  function renderOpenPositions() {
+    const tbody = document.getElementById('openTbody');
+    const count = document.getElementById('openCount');
+    const empty = document.getElementById('openEmpty');
+    const table = document.getElementById('openPosTable');
+    const totalPnl = document.getElementById('openPnlTotal');
+
+    // Collect all open trades from all symbols
+    let allOpen = [];
+    let totalUnrealized = 0;
+    if (state.data) {
+      (state.symbols||[]).forEach(sym => {
+        const d = state.data[sym];
+        if (d && d.open_trades) {
+          d.open_trades.forEach(t => {
+            t._symbol = sym;
+            totalUnrealized += t.unrealized_pnl || 0;
+            allOpen.push(t);
+          });
+        }
+      });
     }
 
-    html += '<div class="session-card ' + cardClass + '" id="sess-' + s.id + '">';
-    html += '<div class="sess-emoji">' + s.emoji + '</div>';
-    html += '<div class="sess-name">' + s.name + '</div>';
-    html += '<div class="sess-countdown ' + countClass + '" id="cd-' + s.id + '">' + display + '</div>';
-    html += '<div class="sess-times">' + s.open_local + ' – ' + s.close_local + '</div>';
-    html += '<span class="sess-badge ' + badgeClass + '">' + badgeText + '</span>';
-    html += '</div>';
+    count.textContent = `(${allOpen.length})`;
+    totalPnl.textContent = allOpen.length > 0
+      ? `Total: <span style="color:${totalUnrealized >= 0 ? 'var(--green)' : 'var(--red)'}">${totalUnrealized >= 0 ? '+' : ''}$${totalUnrealized.toFixed(2)}</span>`
+      : '';
+    totalPnl.innerHTML = totalPnl.textContent;
 
-    if (isAlert && !notifiedSessions[s.id]) {
-      notifiedSessions[s.id] = true;
-      showToast(s.name, s.open_local);
-      sendBrowserNotification(s);
-    }
+    empty.style.display = 'none';
+    table.style.display = '';
 
-    startCountdownTimer(s);
-  }
-  document.getElementById('sessionsBar').innerHTML = html;
-}
-
-function startCountdownTimer(session) {
-  let remaining = session.is_open ? session.time_until_close : session.time_until_open;
-  if (remaining <= 0 && !session.is_open) remaining = 86400;
-
-  sessionTimers[session.id] = setInterval(() => {
-    remaining--;
-    if (remaining < 0) {
-      clearInterval(sessionTimers[session.id]);
-      delete sessionTimers[session.id];
+    const now = new Date();
+    if (allOpen.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="13" style="text-align:center;color:var(--text-muted);padding:16px;font-style:italic;">No open positions</td></tr>';
       return;
     }
-    const el = document.getElementById('cd-' + session.id);
-    if (el) el.textContent = formatCountdown(Math.max(0, remaining));
-  }, 1000);
-}
+    tbody.innerHTML = allOpen.map(t => {
+      const side = t.side || (t.direction === 1 ? 'LONG' : t.direction === -1 ? 'SHORT' : '—');
+      const entry = t.entry_price || 0;
+      const tp = t.tp || 0;
+      const sl = t.sl || 0;
+      const notional = t.notional || 0;
+      const upnl = t.unrealized_pnl || 0;
+      const pnlClass = upnl > 0 ? 'green' : upnl < 0 ? 'red' : '';
+      const pnlStr = (upnl >= 0 ? '+' : '') + upnl.toFixed(2);
 
-function formatCountdown(totalSec) {
-  if (totalSec <= 0) return '00:00:00';
-  const h = Math.floor(totalSec / 3600);
-  const m = Math.floor((totalSec % 3600) / 60);
-  const s = totalSec % 60;
-  return String(h).padStart(2, '0') + ':' +
-    String(m).padStart(2, '0') + ':' +
-    String(s).padStart(2, '0');
-}
+      // R:R achieved
+      const riskAmount = Math.abs(entry - sl);
+      const rr = riskAmount > 0 ? (upnl / (notional * (riskAmount / entry))).toFixed(2) : '—';
 
-function showToast(sessionName, openTime) {
-  const container = document.getElementById('toastContainer');
-  const toastId = 'toast-' + Date.now();
-  const toast = document.createElement('div');
-  toast.className = 'toast'; toast.id = toastId;
-  toast.innerHTML = '<div class="toast-title">🔔 MARKET OPENING</div>' +
-    '<div class="toast-body"><b>' + sessionName + '</b> opens in <10 min at ' + openTime + '</div>' +
-    '<span class="toast-dismiss" onclick="dismissToast(\'' + toastId + '\')">×</span>';
-  container.appendChild(toast);
-  setTimeout(() => dismissToast(toastId), 10000);
-}
+      // Duration
+      let duration = '—';
+      if (t.entry_time) {
+        const entryTime = new Date(t.entry_time);
+        const diffMs = now - entryTime;
+        const mins = Math.floor(diffMs / 60000);
+        if (mins < 60) duration = `${mins}m`;
+        else duration = `${Math.floor(mins/60)}h ${mins%60}m`;
+      }
 
-function dismissToast(toastId) {
-  const el = document.getElementById(toastId);
-  if (el) { el.style.opacity = '0'; el.style.transition = 'opacity 0.3s';
-    setTimeout(() => el.remove(), 300); }
-}
+      const trail = t.trailing_active ? '🔒' : '—';
+      const entryFee = t.entry_fee || 0;
+      const notionalVal = t.notional || 0;
+      const feePct = notionalVal > 0 ? (entryFee / notionalVal * 100).toFixed(2) + '%' : '—';
 
-function sendBrowserNotification(session) {
-  if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  try {
-    const n = new Notification('🔔 ' + session.name + ' Opening Soon', {
-      body: 'Opens in less than 10 minutes at ' + session.open_local,
-      tag: 'session-' + session.id, requireInteraction: false,
-    });
-    setTimeout(() => n.close(), 8000);
-  } catch (e) {}
-}
-
-// ─── Notifications permission ───────────────────────────────────
-
-async function requestNotificationPermission() {
-  if (!('Notification' in window)) return;
-  if (Notification.permission === 'granted' || Notification.permission === 'denied') return;
-  try { await Notification.requestPermission(); } catch (e) {}
-}
-
-// ─── Symbol List ────────────────────────────────────────────────
-
-async function loadSymbolList() {
-  try {
-    const resp = await fetch('/api/symbols');
-    if (resp.ok) allSymbols = await resp.json();
-  } catch (e) {}
-}
-
-// ─── Selector ───────────────────────────────────────────────────
-
-function updateSelector(state) {
-  const syms = state.symbols || [];
-  symOrder = syms;
-
-  let chipsHtml = '';
-  for (const sym of syms) {
-    const display = (state.data[sym] || {}).display || sym;
-    chipsHtml += '<span class="active-chip">' + display +
-      ' <span class="remove-chip" onclick="removeSymbol(\'' + sym + '\')" title="Remove">×</span></span>';
+      return `<tr>
+        <td>${t._symbol || ''}</td>
+        <td>#${t.id || ''}</td>
+        <td class="${side === 'LONG' ? 'green' : 'red'}">${side}</td>
+        <td>$${entry.toFixed(entry < 1 ? 6 : 2)}</td>
+        <td>$${tp.toFixed(tp < 1 ? 6 : 2)}</td>
+        <td style="color:var(--red-dim)">$${sl.toFixed(sl < 1 ? 6 : 2)}</td>
+        <td>$${notional.toFixed(0)}</td>
+        <td class="${pnlClass}">$${pnlStr}</td>
+        <td style="color:var(--text-muted);font-size:9px;">$${entryFee.toFixed(2)} · ${feePct}</td>
+        <td style="color:var(--text-muted)">${rr}x</td>
+        <td style="color:var(--text-muted);font-size:9px;">${duration}</td>
+        <td style="text-align:center">${trail}</td>
+        <td><button class="btn-close-trade" onclick="closeTrade(${t.id},'${t._symbol}')" title="Close trade">✕</button></td>
+      </tr>`;
+    }).join('');
   }
-  document.getElementById('activeChips').innerHTML = chipsHtml;
 
-  const select = document.getElementById('symbolSelect');
-  const currentVal = select.value;
-  select.innerHTML = '<option value="">+ Add Symbol</option>';
-  const activeSet = new Set(syms);
-  for (const s of allSymbols) {
-    if (!activeSet.has(s.code)) {
-      select.innerHTML += '<option value="' + s.code + '">' + s.display + '</option>';
+  // ── Closed Trades ──────────────────────────────────────────────────────
+  function renderClosedTrades() {
+    const tbody = document.getElementById('closedTbody');
+    const count = document.getElementById('closedCount');
+    const summary = document.getElementById('tradeSummary');
+    if (!state.closed_trades) return;
+    const trades = state.closed_trades;
+    count.textContent = `(${trades.length})`;
+
+    // Win/Loss summary
+    const wins = trades.filter(t => t.pnl > 0);
+    const losses = trades.filter(t => t.pnl < 0);
+    const totalPnl = trades.reduce((s, t) => s + (t.pnl || 0), 0);
+    const avgWin = wins.length > 0 ? (wins.reduce((s, t) => s + t.pnl, 0) / wins.length) : 0;
+    const avgLoss = losses.length > 0 ? (losses.reduce((s, t) => s + t.pnl, 0) / losses.length) : 0;
+    const bigWin = wins.length > 0 ? Math.max(...wins.map(t => t.pnl)) : 0;
+    const bigLoss = losses.length > 0 ? Math.min(...losses.map(t => t.pnl)) : 0;
+
+    summary.innerHTML = trades.length > 0
+      ? `<span class="green">${wins.length}W</span> <span class="red">${losses.length}L</span>`
+        + ` · AvgWin <span class="green">$${avgWin.toFixed(2)}</span>`
+        + ` · AvgLoss <span class="red">$${avgLoss.toFixed(2)}</span>`
+        + ` · Best <span class="green">+$${bigWin.toFixed(2)}</span>`
+        + ` · Worst <span class="red">$${bigLoss.toFixed(2)}</span>`
+        + ` · Total <span style="color:${totalPnl >= 0 ? 'var(--green)' : 'var(--red)'}">$${totalPnl.toFixed(2)}</span>`
+      : 'No trades yet';
+
+    const rows = trades.slice(-50).reverse().map(t => {
+      const pnl = t.pnl || 0;
+      const pnlClass = pnl > 0 ? 'pnl-positive' : pnl < 0 ? 'pnl-negative' : 'pnl-neutral';
+      const reason = t.close_reason || t.reason || '';
+      const reasonClass = reason === 'TP' ? 'close-tp' : reason === 'SL' ? 'close-sl' : reason === 'TRAILING' ? 'close-trailing' : reason === 'MANUAL' ? 'close-manual' : '';
+      const pnlStr = (pnl >= 0 ? '+' : '') + pnl.toFixed(2);
+      const fees = t.total_fees || t.entry_fee || 0;
+      const risk = t.risk_amount || (t.notional ? t.notional * 0.02 : 0);
+      const rr = risk > 0 ? (pnl / risk).toFixed(2) : '—';
+      const side = t.side || (t.direction === 1 ? 'LONG' : t.direction === -1 ? 'SHORT' : '—');
+
+      return `<tr>
+        <td>${t.symbol||''}</td>
+        <td>#${t.id||''}</td>
+        <td class="${side === 'LONG' ? 'green' : 'red'}">${side}</td>
+        <td>$${t.entry_price ? t.entry_price.toFixed(t.entry_price < 1 ? 6 : 2) : '—'}</td>
+        <td>$${t.close_price ? t.close_price.toFixed(t.close_price < 1 ? 6 : 2) : '—'}</td>
+        <td style="font-size:9px;color:var(--text-muted)">${t.pattern_type||'—'}</td>
+        <td class="${pnlClass}">$${pnlStr}</td>
+        <td style="color:var(--text-muted);font-size:9px;">${rr}x</td>
+        <td class="${reasonClass}">${reason}</td>
+        <td style="color:var(--text-muted);font-size:9px;">$${fees.toFixed(2)}</td>
+        <td style="font-size:9px;color:var(--text-muted)">${t.close_time ? t.close_time.split(' ')[1] : ''}</td>
+      </tr>`;
+    }).join('');
+    tbody.innerHTML = rows;
+  }
+
+  // ── Log ─────────────────────────────────────────────────────────────────
+  function renderLog() {
+    const el = document.getElementById('eventLog');
+    if (!state.event_log) return;
+    const lines = state.event_log.slice(-30).map(e =>
+      `<div class="event-line"><span class="event-time">${e.time||''}</span><span class="event-tag ${e.tag||'INFO'}">${e.tag||'INFO'}</span><span class="event-msg">${escapeHtml(e.msg||'')}</span></div>`
+    ).join('');
+    el.innerHTML = lines;
+    const container = document.getElementById('eventLogContainer');
+    container.scrollTop = container.scrollHeight;
+  }
+
+  // ── Self-Learning Panel ─────────────────────────────────────────────────
+  function renderLearnPanel() {
+    if (!state.self_learning) return;
+    const sl = state.self_learning;
+    const m = sl.metrics || {};
+
+    document.getElementById('learnSharpe').textContent = m.sharpe_ratio ? m.sharpe_ratio.toFixed(2) : '0.00';
+    document.getElementById('sharpeFill').style.width = (m.goal_sharpe_progress||0) + '%';
+    document.getElementById('learnWinrate').textContent = (m.win_rate||0) + '%';
+    document.getElementById('winrateFill').style.width = (m.goal_winrate_progress||0) + '%';
+    document.getElementById('learnReturn').textContent = (m.goal_return_progress||0) + '%';
+    document.getElementById('returnFill').style.width = (m.goal_return_progress||0) + '%';
+    document.getElementById('learnDD').textContent = (m.goal_dd_pct||0) + '%';
+    document.getElementById('ddFill').style.width = Math.min(100, (m.goal_dd_pct||0) * 5) + '%';
+
+    document.getElementById('statPF').textContent = m.profit_factor ? m.profit_factor.toFixed(2) : '0.00';
+    document.getElementById('statExp').textContent = '$' + ((m.expectancy||0)).toFixed(2);
+    document.getElementById('statAvgWin').textContent = '$' + (m.avg_win||0).toFixed(2);
+    document.getElementById('statAvgLoss').textContent = '$' + (m.avg_loss||0).toFixed(2);
+    document.getElementById('statBestPat').textContent = m.best_pattern || '—';
+    document.getElementById('statWorstPat').textContent = m.worst_pattern || '—';
+    document.getElementById('statTotalTrades').textContent = m.total_trades||0;
+
+    const p = sl.active_params || {};
+    document.getElementById('paramWick').textContent = p.wick_ratio !== null && p.wick_ratio !== undefined ? p.wick_ratio.toFixed(2) : 'default';
+    document.getElementById('paramATR').textContent = p.entry_threshold !== null && p.entry_threshold !== undefined ? p.entry_threshold.toFixed(2) : 'default';
+    document.getElementById('paramRR').textContent = p.rr_ratio !== null && p.rr_ratio !== undefined ? p.rr_ratio.toFixed(2) : 'default';
+    document.getElementById('paramRisk').textContent = p.risk_pct !== null && p.risk_pct !== undefined ? (p.risk_pct*100).toFixed(1)+'%' : 'default';
+
+    document.getElementById('hypoText').textContent = sl.hypothesis || 'Waiting for enough trades...';
+    document.getElementById('learnVersion').textContent = `v${sl.param_version||0} — ${(sl.param_history||[]).length} tunings`;
+
+    const badge = document.getElementById('learnStatusBadge');
+    if (badge) {
+      badge.textContent = sl.enabled ? 'ACTIVE' : 'PAUSED';
+      badge.style.background = sl.enabled ? 'rgba(0,200,83,0.15)' : 'rgba(255,82,82,0.1)';
+      badge.style.color = sl.enabled ? 'var(--green)' : 'var(--red)';
     }
-  }
-  if (currentVal && activeSet.has(currentVal)) select.value = '';
-  else if (currentVal) select.value = currentVal;
-}
 
-// ─── Symbol Panels ──────────────────────────────────────────────
-
-function buildSymbolPanels(state) {
-  const syms = state.symbols || [];
-  const data = state.data || {};
-
-  const grid = document.getElementById('symbolGrid');
-  if (syms.length === 0) {
-    grid.innerHTML = '<div class="empty-state">No active symbols. Add one above.</div>';
-    return;
+    const btn = document.getElementById('learnBtn');
+    if (btn) btn.style.opacity = sl.enabled ? '1' : '0.4';
   }
 
-  grid.innerHTML = '';
+  // ── Conditions History ─────────────────────────────────────────────────
+  let conditionsCollapsed = false;
 
-  for (const sym of syms) {
-    const d = data[sym] || {};
-    const tick = d.ticker || {};
-    const sig = d.signal_state || {};
-    const ind = d.indicators || {};
-    const manip = d.manipulation;
-    const openT = d.open_trades || [];
-    const c5 = d.candles_5m || [];
-    const cap = d.capital || {};
-    const openPnl = d.open_pnl || 0;
-
-    const price = tick.price || 0;
-    const chg = tick.change_pct || 0;
-    const priceDec = price > 1000 ? 2 : price > 1 ? 4 : 6;
-    const chgColor = chg >= 0 ? 'var(--green)' : 'var(--red)';
-
-    // Signal status
-    let sigClass = 'IDLE', sigText = '⏳ WAITING';
-    if (sig.signal && sig.signal !== 'None') {
-      sigClass = sig.signal;
-      sigText = '🔥 ' + sig.signal + ' — ' + (sig.pattern_type || '') +
-        ' | TP=$' + (sig.tp || 0).toFixed(priceDec) +
-        ' SL=$' + (sig.sl || 0).toFixed(priceDec);
-    } else if (manip) {
-      sigClass = 'MANIPULATION';
-      sigText = '⚠ MANIP: ' + manip.direction +
-        ' Range=$' + (manip.range || 0).toFixed(priceDec);
-    }
-
-    const pnlClass = openPnl >= 0 ? 'var(--green)' : 'var(--red)';
-    const pnlSign = openPnl >= 0 ? '+' : '';
-    const capBal = cap.balance || 500;
-    const capPnl = cap.total_pnl || 0;
-    const capClass = capPnl >= 0 ? 'var(--green)' : 'var(--red)';
-    const capSign = capPnl >= 0 ? '+' : '';
-    const display = d.display || sym;
-
-    const html =
-      '<div class="sym-panel" id="panel-' + sym + '">' +
-        '<div class="sym-header">' +
-          '<div class="sym-name-section">' +
-            '<div class="sym-pair" style="color:' + chgColor + '">' + display + '</div>' +
-            '<div class="sym-change" style="color:' + chgColor + '" id="change-' + sym + '">' +
-              (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%</div>' +
-            '<div class="sym-capital">' +
-              '<span>Cap: <span class="cap-val" style="color:' + capClass + '">$' + capBal.toFixed(2) + '</span></span>' +
-              '<span style="color:' + capClass + ';font-size:9px;">(' + capSign + '$' + capPnl.toFixed(2) + ')</span>' +
-              '<span style="color:var(--accent);font-size:9px;">10%=$' + (capBal * 0.10).toFixed(2) + '</span>' +
-              '<span style="color:var(--text-muted);font-size:9px;">' +
-                (cap.total_trades || 0) + 'T/' + (cap.winning_trades || 0) + 'W</span>' +
-            '</div>' +
-          '</div>' +
-          '<div class="sym-price-section">' +
-            '<div class="sym-price" id="price-' + sym + '" style="color:' + chgColor + '">$' +
-              price.toFixed(priceDec) + '</div>' +
-          '</div>' +
-        '</div>' +
-        '<div class="sym-signal-bar ' + sigClass + '">' + sigText + '</div>' +
-        '<div class="sym-stats">' +
-          '<div class="sym-stat"><div class="stat-label">Daily ATR</div>' +
-            '<div class="stat-value" style="color:var(--accent)">$' + (ind.daily_atr || 0).toFixed(priceDec) + '</div></div>' +
-          '<div class="sym-stat"><div class="stat-label">Threshold</div>' +
-            '<div class="stat-value" style="color:var(--yellow)">$' + (ind.daily_atr_threshold || 0).toFixed(priceDec) + '</div></div>' +
-          '<div class="sym-stat"><div class="stat-label">5m ATR</div>' +
-            '<div class="stat-value" style="color:var(--text-secondary)">$' + (ind['5m_atr14'] || 0).toFixed(priceDec) + '</div></div>' +
-          '<div class="sym-stat"><div class="stat-label">Vol/24h</div>' +
-            '<div class="stat-value" style="color:var(--text-secondary)">$' + fmtVolume(tick.volume || 0) + '</div></div>' +
-          '<div class="sym-stat"><div class="stat-label">Open PnL</div>' +
-            '<div class="stat-value" style="color:' + pnlClass + '">' + openT.length + 'pos / ' + pnlSign + '$' + openPnl.toFixed(2) + '</div></div>' +
-        '</div>' +
-        '<div class="sym-chart"><canvas class="sym-canvas" id="chart-' + sym + '"></canvas></div>' +
-        (openT.length > 0 ? renderOpenPositions(openT, priceDec) : '') +
-        '<div class="sym-footer">' +
-          '<button class="btn btn-danger btn-sm" onclick="resetSymbol(\'' + sym + '\')">Reset ' + display + '</button>' +
-        '</div>' +
-      '</div>';
-    grid.innerHTML += html;
+  function fetchConditions() {
+    fetch('/api/conditions?limit=100')
+      .then(r => r.json())
+      .then(conds => renderConditions(conds))
+      .catch(() => {});
   }
 
-  // Draw charts using live data
-  for (const sym of syms) {
-    drawMiniChart(sym, liveCandles[sym]?.['5m'] || [], liveManip[sym], liveSignal[sym] || {});
-  }
-}
+  function renderConditions(conds) {
+    const tbody = document.getElementById('conditionsTbody');
+    const count = document.getElementById('conditionsCount');
+    if (!tbody || !conds) return;
+    count.textContent = `(${conds.length})`;
 
-function renderOpenPositions(trades, priceDec) {
-  let html = '<div class="sym-positions">';
-  for (const t of trades) {
-    const pnlS = (t.unrealized_pnl || 0) >= 0 ? '+' : '';
-    const pnlC = (t.unrealized_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
-    html += '<div class="sym-pos-item">' +
-      '<span>' + t.side + ' #' + t.id + ' @$' + (t.entry_price || 0).toFixed(priceDec) +
-      ' N=$' + (t.notional || 250).toFixed(0) + '</span>' +
-      '<span style="color:' + pnlC + '">' + pnlS + '$' + (t.unrealized_pnl || 0).toFixed(2) + '</span>' +
-      '</div>';
-  }
-  html += '</div>';
-  return html;
-}
+    tbody.innerHTML = conds.slice(-80).reverse().map(c => {
+      const sig = c.signal || '—';
+      const sigClass = sig === 'LONG' ? 'green' : sig === 'SHORT' ? 'red' : '';
+      const score = c.score || 0;
+      const tp = c.tp || 0;
+      const sl = c.sl || 0;
+      const evType = c.event_type || '';
+      const evClass = evType === 'SIGNAL' ? 'yellow' : evType === 'TRADE_OPEN' ? 'green' : evType === 'TRADE_CLOSE' ? '' : '';
 
-function fmtVolume(v) {
-  if (v >= 1e9) return (v / 1e9).toFixed(1) + 'B';
-  if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
-  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
-  return v.toFixed(0);
-}
-
-// ─── Mini Candle Chart ──────────────────────────────────────────
-
-function drawMiniChart(sym, c5, manip, sig) {
-  const canvas = document.getElementById('chart-' + sym);
-  if (!canvas) return;
-  if (!c5 || c5.length < 2) {
-    // Not enough data yet — clear canvas gracefully
-    const ctx = canvas.getContext('2d');
-    canvas.width = canvas.offsetWidth || 200;
-    canvas.height = 110;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = '#5d606b';
-    ctx.font = '9px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('Waiting for data...', canvas.width / 2, 55);
-    return;
+      return `<tr style="font-size:9px;">
+        <td style="color:var(--text-muted)">${(c.timestamp||'').split(' ')[1]||''}</td>
+        <td class="${evClass}" style="font-weight:600">${evType}</td>
+        <td>${c.symbol||''}</td>
+        <td class="${sigClass}">${sig}</td>
+        <td>${score}</td>
+        <td>${tp ? (tp < 1 ? tp.toFixed(6) : tp.toFixed(2)) : '—'}</td>
+        <td>${sl ? (sl < 1 ? sl.toFixed(6) : sl.toFixed(2)) : '—'}</td>
+        <td>${c.regime||'—'}</td>
+        <td>${c.vol_label||'—'}</td>
+        <td>${c.atr ? (c.atr < 1 ? c.atr.toFixed(6) : c.atr.toFixed(2)) : '—'}</td>
+        <td>${c.rsi||'—'}</td>
+        <td>${c.capital ? '$'+c.capital.toFixed(0) : '—'}</td>
+        <td>${c.open_trades_count||0}</td>
+        <td>${c.total_trades||0}</td>
+        <td>${c.win_rate ? c.win_rate+'%' : '—'}</td>
+        <td>${c.profit_factor||'—'}</td>
+        <td style="color:var(--accent);font-size:8px;">${(c.best_pattern||'—').substring(0,8)}</td>
+        <td style="color:var(--red-dim);font-size:8px;">${(c.worst_pattern||'—').substring(0,8)}</td>
+        <td>${c.wick_ratio||'—'}</td>
+        <td>${c.entry_threshold||'—'}</td>
+        <td>${c.rr_ratio||'—'}</td>
+        <td>${c.risk_pct ? (c.risk_pct*100).toFixed(1) : '—'}</td>
+      </tr>`;
+    }).join('');
   }
 
-  // Filter out candles with NaN/Infinity prices
-  const clean = c5.filter(c => isFinite(c.o) && isFinite(c.h) && isFinite(c.l) && isFinite(c.c));
-  if (clean.length < 2) return;
+  window.toggleConditions = function() {
+    conditionsCollapsed = !conditionsCollapsed;
+    const body = document.getElementById('conditionsBody');
+    const toggle = document.getElementById('conditionsToggle');
+    if (body) body.style.display = conditionsCollapsed ? 'none' : '';
+    if (toggle) toggle.textContent = conditionsCollapsed ? '▶' : '▼';
+    if (!conditionsCollapsed) fetchConditions();
+  };
 
-  const ctx = canvas.getContext('2d');
-  const W = canvas.width = Math.max(canvas.offsetWidth || 200, 100);
-  const H = canvas.height = 110;
-  ctx.clearRect(0, 0, W, H);
+  // ── Actions ─────────────────────────────────────────────────────────────
+  window.addSymbol = function() {
+    const sel = document.getElementById('symbolSelect');
+    const sym = sel.value;
+    if (!sym) return toast('Select a symbol first', 'info');
+    fetch('/api/symbol/add', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({symbol: sym})
+    }).then(r => r.json()).then(d => {
+      if (d.status === 'ok') { toast(`Added ${sym}`, 'success'); refreshState(); }
+      else toast(d.message || 'Failed', 'error');
+    }).catch(() => toast('Request failed', 'error'));
+  };
 
-  const ml = 35, mr = 8, mt = 6, mb = 14;
-  const pw = W - ml - mr, ph = H - mt - mb;
-  if (pw <= 0 || ph <= 0) return;
+  window.removeSymbol = function(sym) {
+    fetch('/api/symbol/remove', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({symbol: sym})
+    }).then(r => r.json()).then(d => {
+      if (d.status === 'ok') { toast(`Removed ${sym}`, 'info'); refreshState(); }
+      else toast(d.message || 'Failed', 'error');
+    }).catch(() => toast('Request failed', 'error'));
+  };
 
-  const prices = [];
-  for (const c of clean) { prices.push(c.h, c.l); }
-  let pmin = Math.min(...prices), pmax = Math.max(...prices);
-  if (!isFinite(pmin) || !isFinite(pmax) || pmax === pmin) {
-    pmin -= 1; pmax += 1;
-  }
-  const pad = (pmax - pmin) * 0.06 || pmax * 0.01 || 1;
-  pmin -= pad; pmax += pad;
+  window.resetAll = function() {
+    if (!confirm('Reset all accounts to initial capital?')) return;
+    fetch('/api/reset', {method: 'POST'})
+      .then(r => r.json()).then(d => {
+        toast(d.message || 'Reset complete', 'success');
+        refreshState();
+      }).catch(() => toast('Reset failed', 'error'));
+  };
 
-  const xScale = (i) => ml + (i / (clean.length - 1)) * pw;
-  const yScale = (p) => mt + (1 - (p - pmin) / (pmax - pmin)) * ph;
-  const barW = Math.max(1, (pw / clean.length) * 0.65);
+  window.toggleLearn = function() {
+    const current = state && state.self_learning ? state.self_learning.enabled : true;
+    fetch('/api/self-learn/toggle', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enable: !current})
+    }).then(r => r.json()).then(d => {
+      toast(d.enabled ? 'Self-learning enabled' : 'Self-learning disabled', 'info');
+      refreshState();
+    }).catch(() => toast('Failed', 'error'));
+  };
 
-  // Grid lines
-  ctx.strokeStyle = '#2a2e39'; ctx.lineWidth = 0.5;
-  for (let i = 0; i <= 4; i++) {
-    const y = mt + (i / 4) * ph;
-    ctx.beginPath(); ctx.moveTo(ml, y); ctx.lineTo(W - mr, y); ctx.stroke();
-  }
+  // ── Close Trade ──────────────────────────────────────────────────────────
+  window.closeTrade = function(tradeId, symbol) {
+    if (!confirm(`Close trade #${tradeId} (${symbol})?`)) return;
+    fetch('/api/trade/close', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({trade_id: tradeId, symbol: symbol})
+    }).then(r => r.json()).then(d => {
+      if (d.status === 'ok') {
+        toast(d.message || `Trade #${tradeId} closed`, 'success');
+        refreshState();
+      } else {
+        toast(d.message || 'Failed to close trade', 'error');
+      }
+    }).catch(() => toast('Close request failed', 'error'));
+  };
 
-  // Candles
-  for (let i = 0; i < clean.length; i++) {
-    const c = clean[i]; const x = xScale(i);
-    const oy = yScale(c.o), cy = yScale(c.c);
-    const hy = yScale(c.h), ly = yScale(c.l);
-
-    const isGreen = c.c >= c.o;
-    ctx.strokeStyle = isGreen ? '#089981' : '#f23645'; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(x, hy); ctx.lineTo(x, ly); ctx.stroke();
-
-    ctx.fillStyle = isGreen ? '#089981' : '#f23645';
-    const bodyTop = Math.min(oy, cy);
-    const bodyH = Math.max(1, Math.abs(cy - oy));
-    ctx.fillRect(x - barW / 2, bodyTop, barW, bodyH);
-  }
-
-  // Manipulation lines
-  if (manip) {
-    ctx.setLineDash([3, 3]); ctx.strokeStyle = '#ff9800'; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(ml, yScale(manip.high)); ctx.lineTo(W - mr, yScale(manip.high)); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(ml, yScale(manip.low)); ctx.lineTo(W - mr, yScale(manip.low)); ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.fillStyle = '#ff9800'; ctx.font = '8px monospace'; ctx.textAlign = 'left';
-    ctx.fillText('M:' + manip.direction, W - mr - 45, yScale(manip.high) - 2);
-  }
-
-  // TP/SL lines
-  if (sig.signal && sig.tp > 0) {
-    ctx.setLineDash([2, 4]);
-    ctx.strokeStyle = '#089981'; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(ml, yScale(sig.tp)); ctx.lineTo(W - mr, yScale(sig.tp)); ctx.stroke();
-    ctx.fillStyle = '#089981'; ctx.font = '8px monospace'; ctx.textAlign = 'left';
-    ctx.fillText('TP', W - mr - 18, yScale(sig.tp) - 2);
-
-    ctx.strokeStyle = '#f23645';
-    ctx.beginPath(); ctx.moveTo(ml, yScale(sig.sl)); ctx.lineTo(W - mr, yScale(sig.sl)); ctx.stroke();
-    ctx.fillStyle = '#f23645';
-    ctx.fillText('SL', W - mr - 18, yScale(sig.sl) - 2);
-    ctx.setLineDash([]);
-  }
-
-  // Price labels
-  ctx.fillStyle = '#5d606b'; ctx.font = '8px monospace'; ctx.textAlign = 'right';
-  const dec = clean[0].o < 1 ? 5 : 2;
-  ctx.fillText('$' + pmax.toFixed(dec), ml - 3, mt + 8);
-  ctx.fillText('$' + pmin.toFixed(dec), ml - 3, mt + ph);
-}
-
-// ─── Closed Trades ──────────────────────────────────────────────
-
-function updateClosedTrades(trades) {
-  const tbody = document.getElementById('closedTbody');
-  document.getElementById('closedCount').textContent = '(' + (trades || []).length + ' shown)';
-
-  if (!trades || trades.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:16px;">No closed trades</td></tr>';
-    return;
+  // ── Helpers ─────────────────────────────────────────────────────────────
+  function toast(msg, type) {
+    const container = document.getElementById('toastContainer');
+    const el = document.createElement('div');
+    el.className = `toast ${type||'info'}`;
+    el.textContent = msg;
+    container.appendChild(el);
+    setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 0.3s'; setTimeout(() => el.remove(), 300); }, 3000);
   }
 
-  let html = '';
-  for (const t of trades) {
-    const pnlClass = (t.pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
-    const pnlSign = (t.pnl || 0) >= 0 ? '+' : '';
-    const resultBadge = (t.pnl || 0) >= 0 ? 'badge badge-win' : 'badge badge-loss';
-    const resultText = (t.pnl || 0) >= 0 ? 'WIN' : 'LOSS';
-    const sideBadge = t.side === 'LONG' ? 'badge badge-long' : 'badge badge-short';
-    const priceDec = (t.close_price || t.entry_price || 0) > 1000 ? 2 : 4;
-
-    html += '<tr>' +
-      '<td style="color:var(--accent)">' + (t.symbol || '') + '</td>' +
-      '<td>#' + t.id + '</td>' +
-      '<td><span class="' + sideBadge + '">' + t.side + '</span></td>' +
-      '<td>$' + (t.entry_price || 0).toFixed(priceDec) + '</td>' +
-      '<td>$' + (t.close_price || 0).toFixed(priceDec) + '</td>' +
-      '<td>$' + (t.notional || 250).toFixed(0) + '</td>' +
-      '<td style="color:' + pnlClass + '">' + pnlSign + '$' + (t.pnl || 0).toFixed(2) + '</td>' +
-      '<td><span class="' + resultBadge + '">' + resultText + '</span> ' + (t.close_reason || '') + '</td>' +
-      '<td style="font-size:9px;color:var(--text-muted)">' + (t.close_time || '') + '</td>' +
-      '</tr>';
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
   }
-  tbody.innerHTML = html;
-}
 
-// ─── Event Log ──────────────────────────────────────────────────
+  // ── Boot ────────────────────────────────────────────────────────────────
+  document.addEventListener('DOMContentLoaded', init);
 
-function updateEventLog(events) {
-  const container = document.getElementById('eventLog');
-  let html = '';
-  for (const e of (events || [])) {
-    html += '<div class="log-entry">' +
-      '<span class="log-time">' + e.time + '</span>' +
-      '<span class="log-tag-' + e.tag + '">[' + e.tag + ']</span> ' +
-      (e.msg || '') + '</div>';
-  }
-  container.innerHTML = html;
-  const scrollC = document.getElementById('eventLogContainer');
-  if (scrollC) scrollC.scrollTop = scrollC.scrollHeight;
-}
-
-// ─── Symbol Add / Remove ────────────────────────────────────────
-
-async function addSymbol() {
-  const select = document.getElementById('symbolSelect');
-  const sym = select.value;
-  if (!sym) return;
-  showLoading('Adding ' + sym + '...');
-  try {
-    const resp = await fetch('/api/symbol/add', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol: sym }),
-    });
-    const data = await resp.json();
-    if (data.status === 'ok') {
-      select.value = '';
-      await loadSymbolList();
-    } else { alert(data.message); }
-  } catch (e) { alert('Add failed: ' + e); }
-  hideLoading();
-}
-
-async function removeSymbol(sym) {
-  if (!confirm('Remove ' + sym + ' from active trading?')) return;
-  showLoading('Removing ' + sym + '...');
-  try {
-    const resp = await fetch('/api/symbol/remove', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol: sym }),
-    });
-    const data = await resp.json();
-    if (data.status === 'ok') { await loadSymbolList(); }
-    else { alert(data.message); }
-  } catch (e) { alert('Remove failed: ' + e); }
-  hideLoading();
-}
-
-// ─── Reset ──────────────────────────────────────────────────────
-
-async function resetAll() {
-  if (!confirm('Reset ALL accounts to $500 each? This clears ALL trade history.')) return;
-  showLoading('Resetting all...');
-  try { await fetch('/api/reset', { method: 'POST' }); } catch (e) {}
-  hideLoading();
-}
-
-async function resetSymbol(sym) {
-  if (!confirm('Reset ' + sym + ' capital to $500?')) return;
-  showLoading('Resetting ' + sym + '...');
-  try { await fetch('/api/reset?symbol=' + sym, { method: 'POST' }); } catch (e) {}
-  hideLoading();
-}
-
-// ─── Loading ────────────────────────────────────────────────────
-
-function showLoading(msg) {
-  document.getElementById('loadingOverlay').classList.add('active');
-  document.getElementById('loadingText').textContent = msg;
-}
-function hideLoading() {
-  document.getElementById('loadingOverlay').classList.remove('active');
-}
-
-// ─── Start ──────────────────────────────────────────────────────
-init();
+})();

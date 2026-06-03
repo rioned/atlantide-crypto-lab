@@ -3,20 +3,21 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ATLANTIDE — Pattern Scalp | Professional</title>
+  <title>CRYPTO LAB 2 — Self-Learning Pattern Scalp</title>
   <link rel="stylesheet" href="/static/dashboard.css">
 </head>
 <body>
 
 <div class="loading-overlay" id="loadingOverlay">
   <div class="loading-spinner"></div>
-  <div class="loading-text" id="loadingText">Initializing...</div>
+  <div class="loading-text" id="loadingText">Booting AI trading agent...</div>
 </div>
 
 <!-- TOP BAR -->
 <div class="topbar">
   <div class="topbar-brand">
-    <span class="topbar-logo">⚡ ATLANTIDE</span>
+    <span class="topbar-logo">⚡ CRYPTO LAB 2</span>
+    <span class="topbar-badge badge-accent">v3</span>
     <span class="topbar-status" id="livePill">● LIVE</span>
     <span style="font-size:10px;color:var(--text-muted);" id="symCount"></span>
   </div>
@@ -25,56 +26,183 @@
     <span class="topbar-clock" id="clock">00:00:00</span>
   </div>
   <div class="topbar-actions">
+    <button class="btn btn-ghost btn-sm" onclick="toggleLearn()" id="learnBtn" title="Toggle self-learning agent">🧠</button>
     <button class="btn btn-accent btn-sm" onclick="addSymbol()">+ Symbol</button>
-    <button class="btn btn-danger btn-sm" onclick="resetAll()">Reset All</button>
+    <button class="btn btn-danger btn-sm" onclick="resetAll()">Reset</button>
   </div>
 </div>
-
-<!-- SESSIONS BAR -->
-<div class="sessions-bar" id="sessionsBar"></div>
 
 <!-- TOAST -->
 <div class="toast-container" id="toastContainer"></div>
 
-<!-- MAIN CONTENT -->
-<div class="main-content">
+<!-- MAIN LAYOUT -->
+<div class="main-layout">
 
-  <!-- Selector Bar -->
-  <div class="selector-bar">
-    <span class="selector-label">Active Symbols:</span>
-    <div class="active-chips" id="activeChips"></div>
-    <select id="symbolSelect"><option value="">+ Add Symbol</option></select>
-  </div>
+  <!-- LEFT: Self-Learning Panel -->
+  <div class="side-panel" id="learnPanel">
+    <div class="panel" style="height:100%;">
+      <div class="panel-header">
+        <span>🧠 Self-Learning AI</span>
+        <span class="badge badge-green" id="learnStatusBadge">ACTIVE</span>
+      </div>
+      <div class="panel-body" id="learnBody">
+        <div class="learn-metrics-grid" id="learnMetrics">
+          <div class="learn-metric">
+            <div class="learn-label">Sharpe Target</div>
+            <div class="learn-value"><span id="learnSharpe">0.00</span> / 1.5</div>
+            <div class="progress-bar"><div class="progress-fill" id="sharpeFill" style="width:0%"></div></div>
+          </div>
+          <div class="learn-metric">
+            <div class="learn-label">Win Rate Target</div>
+            <div class="learn-value"><span id="learnWinrate">0%</span> / 40%</div>
+            <div class="progress-bar"><div class="progress-fill" id="winrateFill" style="width:0%"></div></div>
+          </div>
+          <div class="learn-metric">
+            <div class="learn-label">Return Progress</div>
+            <div class="learn-value"><span id="learnReturn">0%</span> / 10%</div>
+            <div class="progress-bar"><div class="progress-fill" id="returnFill" style="width:0%"></div></div>
+          </div>
+          <div class="learn-metric">
+            <div class="learn-label">Drawdown</div>
+            <div class="learn-value"><span id="learnDD">0%</span> / 20%</div>
+            <div class="progress-bar dd-bar"><div class="progress-fill dd-fill" id="ddFill" style="width:0%"></div></div>
+          </div>
+        </div>
 
-  <!-- Symbol Panels -->
-  <div class="symbol-grid" id="symbolGrid"></div>
+        <div class="learn-stats" id="learnStats">
+          <div class="stat-row"><span class="stat-label">Profit Factor</span><span class="stat-val" id="statPF">0.00</span></div>
+          <div class="stat-row"><span class="stat-label">Expectancy</span><span class="stat-val" id="statExp">$0.00</span></div>
+          <div class="stat-row"><span class="stat-label">Avg Win</span><span class="stat-val green" id="statAvgWin">$0.00</span></div>
+          <div class="stat-row"><span class="stat-label">Avg Loss</span><span class="stat-val red" id="statAvgLoss">$0.00</span></div>
+          <div class="stat-row"><span class="stat-label">Best Pattern</span><span class="stat-val" id="statBestPat">—</span></div>
+          <div class="stat-row"><span class="stat-label">Worst Pattern</span><span class="stat-val" id="statWorstPat">—</span></div>
+          <div class="stat-row"><span class="stat-label">Total Trades</span><span class="stat-val" id="statTotalTrades">0</span></div>
+        </div>
 
-  <!-- Trade History -->
-  <div class="panel">
-    <div class="panel-header">
-      <span>📜 Trade History</span>
-      <span style="font-weight:400;" id="closedCount">(0)</span>
-    </div>
-    <div class="panel-body">
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Sym</th><th>ID</th><th>Side</th><th>Entry</th><th>Exit</th><th>Notional</th><th>PnL</th><th>Result</th><th>Time</th></tr></thead>
-          <tbody id="closedTbody"></tbody>
-        </table>
+        <div class="learn-params" id="learnParams">
+          <div class="param-label">Active Parameters</div>
+          <div class="param-row"><span>wick_ratio</span><span class="mono" id="paramWick">—</span></div>
+          <div class="param-row"><span>entry_threshold</span><span class="mono" id="paramATR">—</span></div>
+          <div class="param-row"><span>rr_ratio</span><span class="mono" id="paramRR">—</span></div>
+          <div class="param-row"><span>risk_pct</span><span class="mono" id="paramRisk">—</span></div>
+        </div>
+
+        <div class="learn-hypothesis" id="learnHypothesis">
+          <div class="param-label">Latest Hypothesis</div>
+          <div class="hypo-text" id="hypoText">Waiting for enough trades...</div>
+        </div>
+
+        <div class="learn-version" id="learnVersion">v0 — no tunings yet</div>
       </div>
     </div>
   </div>
 
-  <!-- Event Log -->
-  <div class="panel">
-    <div class="panel-header">📝 Event Log</div>
-    <div class="panel-body">
-      <div class="event-log" id="eventLogContainer">
-        <div id="eventLog"></div>
+  <!-- RIGHT: Main Content -->
+  <div class="main-content">
+
+    <!-- Selector Bar -->
+    <div class="selector-bar">
+      <span class="selector-label">Symbols:</span>
+      <div class="active-chips" id="activeChips"></div>
+      <select id="symbolSelect"><option value="">+ Add Symbol</option></select>
+    </div>
+
+    <!-- Symbol Panels -->
+    <div class="symbol-grid" id="symbolGrid"></div>
+
+    <!-- Market Sessions -->
+    <div class="panel market-sessions-panel">
+      <div class="panel-header">
+        <span>🌍 Market Sessions</span>
+        <span class="panel-header-right">
+          <span style="font-weight:400;font-size:10px;color:var(--text-muted)" id="marketSessionTime">—</span>
+        </span>
+      </div>
+      <div class="panel-body">
+        <div class="market-sessions-grid" id="marketSessionsGrid"></div>
       </div>
     </div>
-  </div>
 
+    <!-- Open Positions -->
+    <div class="panel open-positions-panel">
+      <div class="panel-header">
+        <span>🔓 Open Positions</span>
+        <span class="panel-header-right">
+          <span style="font-weight:400;font-size:12px;color:var(--text-muted)" id="openCount">(0)</span>
+          <span style="font-size:10px;margin-left:8px;" id="openPnlTotal"></span>
+        </span>
+      </div>
+      <div class="panel-body">
+        <div class="table-wrap" id="openPositionsWrap">
+          <div class="empty-state" id="openEmpty">No open positions</div>
+          <table id="openPosTable" style="display:none;">
+            <thead><tr>
+              <th>Sym</th><th>#</th><th>Side</th><th>Entry</th><th>TP</th><th>SL</th>
+              <th>Notional</th><th>Unreal. PnL</th><th>Fee</th><th>R:R</th><th>Duration</th><th>Trail</th><th></th>
+            </tr></thead>
+            <tbody id="openTbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Trade History -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>📜 Trade History</span>
+        <span class="panel-header-right">
+          <span id="tradeSummary" style="font-weight:400;font-size:11px;color:var(--text-muted)"></span>
+          <a href="/api/trades.csv" download class="btn btn-ghost btn-sm" style="margin-left:8px;text-decoration:none;" title="Download CSV">📥 CSV</a>
+          <span style="font-weight:400;font-size:12px;margin-left:8px;" id="closedCount">(0)</span>
+        </span>
+      </div>
+      <div class="panel-body">
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>Sym</th><th>#</th><th>Side</th><th>Entry</th><th>Exit</th>
+              <th>Pattern</th><th>PnL</th><th>R:R</th><th>Result</th><th>Fees</th><th>Time</th>
+            </tr></thead>
+            <tbody id="closedTbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Event Log -->
+    <div class="panel">
+      <div class="panel-header">📝 Event Log</div>
+      <div class="panel-body">
+        <div class="event-log" id="eventLogContainer">
+          <div id="eventLog"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Conditions History -->
+    <div class="panel" id="conditionsPanel">
+      <div class="panel-header" onclick="toggleConditions()" style="cursor:pointer;">
+        <span>📊 Conditions History</span>
+        <span style="font-weight:400;font-size:12px;color:var(--text-muted)" id="conditionsCount">(0)</span>
+        <span style="margin-left:auto;font-size:10px;color:var(--text-muted)" id="conditionsToggle">▼</span>
+      </div>
+      <div class="panel-body" id="conditionsBody">
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>Time</th><th>Event</th><th>Sym</th><th>Signal</th><th>Score</th>
+              <th>TP</th><th>SL</th><th>Regime</th><th>Vol</th>
+              <th>ATR</th><th>RSI</th><th>Cap</th><th>OT</th><th>TT</th>
+              <th>WR</th><th>PF</th><th>BestP</th><th>WorstP</th>
+              <th>wick_r</th><th>entry_th</th><th>RR</th><th>risk%</th>
+            </tr></thead>
+            <tbody id="conditionsTbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
 </div>
 
 <script src="/static/dashboard.js"></script>

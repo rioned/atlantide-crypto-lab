@@ -1,6 +1,7 @@
-"""SQLite persistence layer for ATLANTIDE Crypto Lab.
+"""SQLite persistence layer for CRYPTO LAB 2.
 
-Handles: schema init, state save/load, closed trades, event log.
+Handles: schema init, state save/load, closed trades, event log,
+parameter history, and trade scores (self-learning).
 
 Uses a SINGLE shared connection with a lock to eliminate
 'database is locked' errors from concurrent threads.
@@ -13,6 +14,7 @@ import threading
 from app.state import (SYMBOLS, capital, capital_lock, state_lock,
                         closed_trades, event_log, open_trades,
                         TRADE_ID_COUNTER, TRADE_ID_LOCK,
+                        param_history, param_version, param_lock,
                         init_symbol_state, ensure_capital)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -110,6 +112,51 @@ def init_db():
             message TEXT,
             level TEXT
         );
+        CREATE TABLE IF NOT EXISTS param_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            version INTEGER,
+            param_changed TEXT,
+            old_value REAL,
+            new_value REAL,
+            trades_evaluated INTEGER,
+            win_rate_before REAL,
+            win_rate_after REAL,
+            pnl_before REAL,
+            pnl_after REAL,
+            hypothesis TEXT,
+            timestamp TEXT
+        );
+        CREATE TABLE IF NOT EXISTS trade_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id INTEGER,
+            symbol TEXT,
+            entry_time TEXT,
+            exit_time TEXT,
+            direction INTEGER,
+            entry_price REAL,
+            exit_price REAL,
+            pnl REAL,
+            reason TEXT,
+            pattern_type TEXT,
+            manip_range REAL,
+            daily_atr REAL,
+            market_regime TEXT,
+            score REAL,
+            market_volatility REAL
+        );
+        CREATE TABLE IF NOT EXISTS perf_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            total_trades INTEGER,
+            win_rate REAL,
+            sharpe_ratio REAL,
+            profit_factor REAL,
+            net_pnl REAL,
+            max_dd REAL,
+            avg_win REAL,
+            avg_loss REAL,
+            expectancy REAL
+        );
     """)
     conn.commit()
     # ── Migration: add columns missing from legacy DBs ─────────────────────
@@ -129,6 +176,44 @@ def init_db():
             conn.commit()
         except sqlite3.OperationalError:
             pass  # column already exists
+    for col, col_type in [("pattern_type", "TEXT DEFAULT ''")]:
+        try:
+            conn.execute(f"ALTER TABLE closed_trades ADD COLUMN {col} {col_type}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    # Migrate: add total_fees to closed_trades for persistent fee tracking
+    for col, col_type in [("total_fees", "REAL DEFAULT 0.0")]:
+        try:
+            conn.execute(f"ALTER TABLE closed_trades ADD COLUMN {col} {col_type}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+    # Migrate: add entry_fee to open_trades for persistent fee tracking on open positions
+    for col, col_type in [("entry_fee", "REAL DEFAULT 0.0")]:
+        try:
+            conn.execute(f"ALTER TABLE open_trades ADD COLUMN {col} {col_type}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    # ── Conditions snapshot table ──────────────────────────────────────────
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS condition_snapshots ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "timestamp TEXT, event_type TEXT, symbol TEXT,"
+            "signal TEXT, score REAL, pattern_type TEXT,"
+            "tp REAL, sl REAL, regime TEXT, vol_label TEXT,"
+            "atr REAL, rsi REAL, capital REAL, capital_pnl REAL,"
+            "open_trades_count INTEGER, open_pnl REAL,"
+            "total_trades INTEGER, total_pnl REAL, win_rate REAL,"
+            "profit_factor REAL, best_pattern TEXT, worst_pattern TEXT,"
+            "wick_ratio REAL, entry_threshold REAL, rr_ratio REAL,"
+            "risk_pct REAL, event_msg TEXT)")
+        conn.commit()
+    except Exception:
+        pass
 
 
 def save_state():
@@ -158,12 +243,13 @@ def save_state():
                 conn.execute(
                     "INSERT OR REPLACE INTO open_trades "
                     "(trade_id, symbol, entry_time, entry_price, direction,"
-                    " tp, sl, notional, margin, unrealized_pnl) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " tp, sl, notional, margin, unrealized_pnl, entry_fee) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (t["id"], sym, t["entry_time"], t["entry"],
                      t["direction"], t["tp"], t["sl"],
                      t.get("notional", 250.0), t.get("margin", 50.0),
-                     t.get("unrealized_pnl", 0.0)))
+                     t.get("unrealized_pnl", 0.0),
+                     t.get("entry_fee", 0.0)))
         conn.commit()
     _with_db(_do)
 
@@ -173,11 +259,12 @@ def save_closed_trade(trade, sym):
         conn.execute(
             "INSERT INTO closed_trades "
             "(symbol, entry_time, exit_time, entry_price, exit_price,"
-            " direction, pnl, reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " direction, pnl, reason, total_fees, pattern_type) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (sym, trade["entry_time"], trade["exit_time"], trade["entry"],
              trade["exit_price"], trade["direction"], trade["pnl"],
-             trade["reason"]))
+             trade["reason"], trade.get("total_fees", 0.0),
+             trade.get("pattern_type", "")))
         conn.commit()
     _with_db(_do)
 
@@ -188,6 +275,65 @@ def save_event(msg, level="INFO"):
         conn.execute("INSERT INTO event_log (timestamp, message, level) "
                      "VALUES (?, ?, ?)",
                      (datetime.now().isoformat(), msg, level))
+        conn.commit()
+    _with_db(_do)
+
+
+def save_trade_score(trade_score):
+    """Save a trade score record for self-learning analysis."""
+    def _do(conn):
+        conn.execute(
+            "INSERT INTO trade_scores "
+            "(trade_id, symbol, entry_time, exit_time, direction,"
+            " entry_price, exit_price, pnl, reason, pattern_type,"
+            " manip_range, daily_atr, market_regime, score,"
+            " market_volatility) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (trade_score["trade_id"], trade_score["symbol"],
+             trade_score["entry_time"], trade_score["exit_time"],
+             trade_score["direction"], trade_score["entry_price"],
+             trade_score["exit_price"], trade_score["pnl"],
+             trade_score["reason"], trade_score["pattern_type"],
+             trade_score["manip_range"], trade_score["daily_atr"],
+             trade_score["market_regime"], trade_score["score"],
+             trade_score["market_volatility"]))
+        conn.commit()
+    _with_db(_do)
+
+
+def save_param_history(entry):
+    """Save a parameter change history record."""
+    def _do(conn):
+        conn.execute(
+            "INSERT INTO param_history "
+            "(version, param_changed, old_value, new_value,"
+            " trades_evaluated, win_rate_before, win_rate_after,"
+            " pnl_before, pnl_after, hypothesis, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (entry["version"], entry["param_changed"],
+             entry["old_value"], entry["new_value"],
+             entry["trades_evaluated"], entry["win_rate_before"],
+             entry["win_rate_after"], entry["pnl_before"],
+             entry["pnl_after"], entry["hypothesis"],
+             entry["timestamp"]))
+        conn.commit()
+    _with_db(_do)
+
+
+def save_perf_snapshot(snapshot):
+    """Save a periodic performance snapshot."""
+    def _do(conn):
+        conn.execute(
+            "INSERT INTO perf_snapshots "
+            "(timestamp, total_trades, win_rate, sharpe_ratio,"
+            " profit_factor, net_pnl, max_dd, avg_win, avg_loss,"
+            " expectancy) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (snapshot["timestamp"], snapshot["total_trades"],
+             snapshot["win_rate"], snapshot["sharpe_ratio"],
+             snapshot["profit_factor"], snapshot["net_pnl"],
+             snapshot["max_dd"], snapshot["avg_win"],
+             snapshot["avg_loss"], snapshot["expectancy"]))
         conn.commit()
     _with_db(_do)
 
@@ -231,7 +377,6 @@ def load_state():
         rows = conn.execute("SELECT * FROM open_trades ORDER BY trade_id ASC").fetchall()
         for row in rows:
             sym = row["symbol"] if row["symbol"] else ""
-            # If symbol column is empty (legacy), try to infer from other data
             if not sym:
                 continue
             if sym in SYMBOLS:
@@ -243,6 +388,7 @@ def load_state():
                     "margin": dict(row).get("margin", 50.0),
                     "exit_price": None, "exit_time": None, "pnl": 0.0,
                     "unrealized_pnl": dict(row).get("unrealized_pnl", 0.0),
+                    "entry_fee": dict(row).get("entry_fee", 0.0),
                     "reason": "",
                 })
 
@@ -257,6 +403,8 @@ def load_state():
                 "entry": row["entry_price"], "exit_price": row["exit_price"],
                 "direction": row["direction"], "pnl": row["pnl"],
                 "reason": row["reason"],
+                "total_fees": dict(row).get("total_fees", 0.0),
+                "pattern_type": dict(row).get("pattern_type", ""),
             })
         with state_lock:
             closed_trades.clear()
@@ -274,6 +422,27 @@ def load_state():
         with state_lock:
             event_log.clear()
             event_log.extend(loaded_events)
+
+        # Load param history
+        rows = conn.execute("SELECT * FROM param_history "
+                            "ORDER BY id ASC LIMIT 50").fetchall()
+        loaded_params = []
+        for row in rows:
+            loaded_params.append({
+                "version": row["version"],
+                "param_changed": row["param_changed"],
+                "old_value": row["old_value"],
+                "new_value": row["new_value"],
+                "win_rate_before": row["win_rate_before"],
+                "win_rate_after": row["win_rate_after"],
+                "hypothesis": row["hypothesis"],
+                "timestamp": row["timestamp"],
+            })
+        with param_lock:
+            param_history.clear()
+            param_history.extend(loaded_params)
+            if loaded_params:
+                param_version[0] = loaded_params[-1]["version"]
 
         return len(SYMBOLS) > 0
 

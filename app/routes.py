@@ -1,9 +1,11 @@
-"""Flask routes and SSE streaming for ATLANTIDE Crypto Lab."""
+"""Flask routes and SSE streaming for CRYPTO LAB 2."""
 
 import json
 import queue
 import threading
 import time
+import csv
+import io
 from datetime import datetime
 
 from flask import (Flask, render_template, jsonify, request,
@@ -11,17 +13,23 @@ from flask import (Flask, render_template, jsonify, request,
 from flask_cors import CORS
 
 from app.config import (SYMBOL_DISPLAY, TOP100_USDT_SYMBOLS,
-                         INITIAL_CAPITAL_PER_SYMBOL)
+                         INITIAL_CAPITAL_PER_SYMBOL, MAX_CLOSED_TRADES, TRADING_FEE)
 from app.state import (SYMBOLS, capital, capital_lock, state_lock,
                         candles, ticker, signal_state, indicators,
                         manipulation_candle, manipulation_active,
                         reversal_pattern, open_trades, closed_trades,
-                        event_log, sse_clients, sse_clients_lock)
-from app.sessions import compute_session_data
+                        event_log, sse_clients, sse_clients_lock,
+                        param_history, param_version, param_lock,
+                        active_params,
+                        perf_metrics, perf_lock,
+                        last_hypothesis, last_hypothesis_lock,
+                        self_learning_active)
 from app.strategy import (_bootstrap_and_restart_ws, log_event)
 from app.market_data import _trigger_ws_restart
-from app.database import get_db, save_state
+from app.database import get_db, save_state, save_closed_trade
 from app.state import init_symbol_state, remove_symbol_state, ensure_capital
+from app.state import last_trade_close_time
+from app.market_sessions import get_all_market_statuses, check_alerts
 
 # ─── Flask App Factory ────────────────────────────────────────────────────────
 
@@ -35,6 +43,12 @@ CORS(app)
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _dp(price):
+    if price <= 0:
+        return 8
+    return 8 if price < 1.0 else 4
+
 
 def _aggregated_account():
     """Compute combined stats across all symbols."""
@@ -82,12 +96,17 @@ def _trade_for_js(t, is_open=True):
     if is_open:
         result["entry_time"] = t.get("entry_time", "")
         result["unrealized_pnl"] = t.get("unrealized_pnl", 0.0)
+        result["trailing_active"] = t.get("trailing_active", False)
+        result["entry_fee"] = t.get("entry_fee", 0.0)
     else:
         result["close_price"] = t.get("exit_price", 0)
         result["pnl"] = t.get("pnl", 0.0)
         result["close_time"] = t.get("exit_time", "")
         result["close_reason"] = t.get("reason", "")
         result["symbol"] = t.get("symbol", "")
+        result["pattern_type"] = t.get("pattern_type", "")
+        result["total_fees"] = t.get("total_fees", t.get("entry_fee", 0))
+        result["risk_amount"] = t.get("risk_amount", 0)
     return result
 
 
@@ -95,13 +114,12 @@ def _trade_for_js(t, is_open=True):
 
 @app.route("/api/stream")
 def api_stream():
-    """Server-Sent Events endpoint — pushes real-time price/signal updates."""
+    """Server-Sent Events endpoint — pushes real-time price/signal/self-learn updates."""
     client_queue = queue.Queue(maxsize=64)
     with sse_clients_lock:
         sse_clients.append(client_queue)
 
     def generate():
-        # Send initial connection event
         yield "event: connected\ndata: {}\n\n"
         try:
             while True:
@@ -111,7 +129,6 @@ def api_stream():
                     yield f"event: {event_type}\n"
                     yield f"data: {json.dumps(data)}\n\n"
                 except queue.Empty:
-                    # Keepalive ping
                     yield "event: ping\ndata: {}\n\n"
         except GeneratorExit:
             pass
@@ -132,6 +149,42 @@ def api_stream():
 
 # ─── Page Routes ──────────────────────────────────────────────────────────────
 
+@app.route("/api/trades.csv")
+def api_trades_csv():
+    """Download all closed trades as CSV."""
+    with state_lock:
+        trades = list(closed_trades)
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["ID", "Symbol", "Side", "Entry Time", "Exit Time",
+                     "Entry Price", "Exit Price", "Pattern", "PnL",
+                     "Reason", "Fees", "Notional", "Risk Amount"])
+    for t in trades:
+        side = "LONG" if t.get("direction") == 1 else "SHORT"
+        writer.writerow([
+            t.get("id", ""),
+            t.get("symbol", ""),
+            side,
+            t.get("entry_time", ""),
+            t.get("exit_time", ""),
+            t.get("entry", 0),
+            t.get("exit_price", 0),
+            t.get("pattern_type", ""),
+            t.get("pnl", 0),
+            t.get("reason", ""),
+            t.get("total_fees", 0),
+            t.get("notional", 250),
+            t.get("risk_amount", 0),
+        ])
+
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=trade_history.csv"}
+    )
+
+
 @app.route("/")
 def index():
     return render_template("dashboard.html")
@@ -149,8 +202,6 @@ def api_state():
         tz_offset = float(request.args.get("tz", "0"))
     except (ValueError, TypeError):
         tz_offset = 0.0
-    utc_now = datetime.utcnow()
-    sessions = compute_session_data(utc_now, tz_offset)
 
     symbols_data = {}
     for sym in SYMBOLS:
@@ -209,15 +260,37 @@ def api_state():
     logs_js = [{"time": e["time"], "tag": e.get("level", "INFO"),
                 "msg": e.get("message", "")} for e in logs]
 
+    # ── Self-learning data ──────────────────────────────────────────────
+    with perf_lock:
+        learn = dict(perf_metrics)
+    with last_hypothesis_lock:
+        hypothesis = last_hypothesis
+    with param_lock:
+        params = {
+            "wick_ratio": active_params.get("wick_ratio"),
+            "atr_threshold": active_params.get("atr_threshold"),
+            "rr_ratio": active_params.get("rr_ratio"),
+            "risk_pct": active_params.get("risk_pct"),
+        }
+        pv = param_version[0]
+        ph = list(param_history[-10:]) if param_history else []
+
     return jsonify({
         "symbols": SYMBOLS,
         "data": symbols_data,
         "account": acct,
         "closed_trades": closed_t_js,
         "event_log": logs_js,
-        "market_sessions": sessions,
-        "utc_time": utc_now.strftime("%H:%M:%S UTC"),
         "server_tz_offset": tz_offset,
+        # Self-learning payload
+        "self_learning": {
+            "metrics": learn,
+            "hypothesis": hypothesis,
+            "param_version": pv,
+            "param_history": ph,
+            "active_params": params,
+            "enabled": self_learning_active.is_set(),
+        },
     })
 
 
@@ -342,13 +415,156 @@ def api_reset():
     if not sym:
         conn.execute("DELETE FROM closed_trades")
         conn.execute("DELETE FROM event_log")
+        conn.execute("DELETE FROM condition_snapshots")
     conn.execute("DELETE FROM open_trades")
     conn.execute("DELETE FROM symbol_capital")
     conn.commit()
-    # Don't close — connection is shared
     save_state()
     log_event(msg, "SYSTEM")
     return jsonify({"status": "ok", "message": msg})
+
+
+@app.route("/api/trade/close", methods=["POST"])
+def api_trade_close():
+    """Manually close an open trade by trade_id and symbol."""
+    data = request.get_json(silent=True) or {}
+    trade_id = data.get("trade_id")
+    sym = (data.get("symbol") or "").strip().upper()
+    if not sym.endswith("USDT"):
+        sym += "USDT"
+
+    if not trade_id or sym not in SYMBOLS:
+        return jsonify({"status": "error",
+                        "message": "Missing trade_id or invalid symbol"}), 400
+
+    try:
+        trade_id = int(trade_id)
+    except (ValueError, TypeError):
+        return jsonify({"status": "error",
+                        "message": f"Invalid trade_id: {trade_id}"}), 400
+
+    with state_lock:
+        trades = open_trades.get(sym, [])
+        trade = next((t for t in trades if t["id"] == trade_id), None)
+
+    if not trade:
+        return jsonify({"status": "error",
+                        "message": f"Trade #{trade_id} not found in {sym}"}), 404
+
+    current_price = 0.0
+    with state_lock:
+        current_price = ticker[sym]["price"]
+    if current_price <= 0:
+        return jsonify({"status": "error",
+                        "message": "No price data available"}), 400
+
+    notional = trade.get("notional", 250.0)
+    pnl_pct = ((current_price - trade["entry"]) /
+               trade["entry"] * trade["direction"])
+    gross_pnl = round(pnl_pct * notional, 2)
+
+    # Fees
+    entry_fee = trade.get("entry_fee",
+                          round(notional * TRADING_FEE, 2))
+    exit_fee = round(abs(notional + gross_pnl) * TRADING_FEE, 2)
+    total_fees = round(entry_fee + exit_fee, 2)
+    net_pnl = round(gross_pnl - total_fees, 2)
+
+    trade["exit_price"] = current_price
+    trade["exit_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    trade["pnl"] = net_pnl
+    trade["entry_fee"] = entry_fee
+    trade["exit_fee"] = exit_fee
+    trade["total_fees"] = total_fees
+    trade["reason"] = "MANUAL"
+
+    # Update capital
+    with capital_lock:
+        cap = capital.get(sym)
+        if cap:
+            cap["balance"] += net_pnl
+            cap["total_pnl"] += net_pnl
+            cap["total_trades"] += 1
+            if net_pnl > 0:
+                cap["winning_trades"] += 1
+            if cap["balance"] > cap["peak"]:
+                cap["peak"] = cap["balance"]
+            if cap["peak"] > 0:
+                dd = ((cap["peak"] - cap["balance"]) / cap["peak"] * 100)
+                cap["max_dd"] = max(cap["max_dd"], dd)
+
+    # Move to closed trades
+    with state_lock:
+        trade["pattern_type"] = signal_state[sym].get("pattern_type", "")
+        trade["manip_range"] = signal_state[sym].get("score", 0)
+        closed_trades.append(dict(trade))
+        closed_trades[-1]["symbol"] = sym
+        if len(closed_trades) > MAX_CLOSED_TRADES:
+            closed_trades.pop(0)
+        # Don't clear last_entry_signal — cooldown is the gatekeeper
+        if trade in open_trades[sym]:
+            open_trades[sym].remove(trade)
+        last_trade_close_time[sym] = time.time()
+
+    save_closed_trade(trade, sym)
+    save_state()
+
+    log_event(
+        f"[{sym}] TRADE #{trade_id} CLOSED (MANUAL): "
+        f"{'LONG' if trade['direction'] == 1 else 'SHORT'} "
+        f"Entry=${trade['entry']:.{_dp(trade['entry'])}f} "
+        f"Exit=${current_price:.{_dp(current_price)}f} "
+        f"PnL=${net_pnl:.2f} "
+        f"Fees=${total_fees:.2f} | "
+        f"Cap=${cap.get('balance', 0):.2f}",
+        "TRADE")
+
+    # Fire-and-forget trade scoring for self-learning
+    try:
+        from app.self_learning import _save_trade_score_for_trade
+        _save_trade_score_for_trade(trade, sym)
+    except Exception:
+        pass
+
+    # Capture conditions snapshot on manual close
+    try:
+        from app.conditions import capture_conditions
+        capture_conditions("TRADE_CLOSE", sym,
+            f"Trade #{trade_id} CLOSED (MANUAL) PnL=${net_pnl:.2f}")
+    except Exception:
+        pass
+
+    return jsonify({
+        "status": "ok",
+        "message": f"Trade #{trade_id} closed with PnL=${net_pnl:.2f}",
+        "pnl": net_pnl,
+        "reason": "MANUAL",
+    })
+
+
+@app.route("/api/trim-logs", methods=["POST"])
+def api_trim_logs():
+    """Trim old ERROR events from event log (in-memory + DB)."""
+    conn = get_db()
+    conn.execute("DELETE FROM event_log WHERE level=\"ERROR\"")
+    conn.commit()
+    with state_lock:
+        event_log[:] = [e for e in event_log if e.get("level") != "ERROR"]
+    msg = f"Trimmed {len(event_log)} remaining entries"
+    log_event("[SYSTEM] Removed stale ERROR entries from log", "SYSTEM")
+    return jsonify({"status": "ok", "message": msg, "remaining": len(event_log)})
+
+
+@app.route("/api/trim-conditions", methods=["POST"])
+def api_trim_conditions():
+    """Clear all condition snapshots."""
+    conn = get_db()
+    conn.execute("DELETE FROM condition_snapshots")
+    conn.commit()
+    msg = "Cleared all condition snapshots"
+    log_event(f"[SYSTEM] {msg}", "SYSTEM")
+    return jsonify({"status": "ok", "message": msg})
+
 
 
 @app.route("/api/capital/set", methods=["POST"])
@@ -378,3 +594,45 @@ def api_capital_set():
     log_event(f"[{sym}] Capital set to ${amount:.2f}", "SYSTEM")
     return jsonify({"status": "ok",
                     "message": f"{sym} capital set to ${amount:.2f}"})
+
+
+# ─── Self-Learning API ───────────────────────────────────────────────────────
+
+@app.route("/api/self-learn/toggle", methods=["POST"])
+def api_self_learn_toggle():
+    """Enable or disable the self-learning agent."""
+    data = request.get_json(silent=True) or {}
+    enable = data.get("enable", None)
+    if enable is True:
+        self_learning_active.set()
+        log_event("[SELF-LEARN] Self-learning agent enabled", "SYSTEM")
+    elif enable is False:
+        self_learning_active.clear()
+        log_event("[SELF-LEARN] Self-learning agent disabled", "SYSTEM")
+    return jsonify({"enabled": self_learning_active.is_set()})
+
+
+@app.route("/api/self-learn/history")
+def api_self_learn_history():
+    """Return full param history."""
+    with param_lock:
+        return jsonify(param_history)
+
+
+# ─── Market Sessions API ──────────────────────────────────────────────────
+
+@app.route("/api/market-sessions")
+def api_market_sessions():
+    """Return current status of all 7 major stock exchanges."""
+    return jsonify(get_all_market_statuses())
+
+
+# ─── Conditions API ───────────────────────────────────────────────────────
+
+@app.route("/api/conditions")
+def api_conditions():
+    """Return condition snapshots (full system state at each event)."""
+    from app.conditions import get_conditions
+    limit = request.args.get("limit", 200, type=int)
+    conds = get_conditions(limit)
+    return jsonify(conds)

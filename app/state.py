@@ -16,7 +16,7 @@ capital = {}
 capital_lock = threading.Lock()
 
 # ─── Global State Lock ─────────────────────────────────────────────────────────
-state_lock = threading.Lock()
+state_lock = threading.RLock()  # reentrant — log_event may be called from within a state_lock block
 
 # ─── Per‑Symbol Data ──────────────────────────────────────────────────────────
 candles = {}          # s -> {"5m": [], "15m": []}
@@ -30,6 +30,7 @@ reversal_pattern = {}     # s -> dict | None
 last_15m_time = {}        # s -> str | None
 open_trades = {}     # s -> [trade, ...]
 indicators = {}      # s -> {"daily_atr", "daily_atr_threshold", "5m_atr14"}
+last_trade_close_time = {}  # s -> float (time.time() of last trade close, for cooldown)
 
 # ─── Global Lists ─────────────────────────────────────────────────────────────
 closed_trades = []
@@ -43,10 +44,56 @@ TRADE_ID_LOCK = threading.Lock()
 ws_stop_event = threading.Event()
 ws_thread_ref = None
 ws_lock = threading.Lock()
+ws_generation = 0  # incremented each restart — old threads check this to know they're stale
 
 # ─── SSE Clients ──────────────────────────────────────────────────────────────
 sse_clients = []           # list of queue.Queue for pending SSE events
 sse_clients_lock = threading.Lock()
+
+# ─── Self-Learning State (from video: goal tracking + param history) ──────────
+self_learning_active = threading.Event()
+self_learning_active.set()   # enabled by default
+
+# Current active parameters (hot-reloadable by self_learning engine)
+active_params = {
+    "wick_ratio": None,       # HAMMER_MIN_WICK_RATIO override
+    "entry_threshold": None,  # ENTRY_THRESHOLD override
+    "rr_ratio": None,         # RR_RATIO override
+    "risk_pct": None,         # RISK_PCT override
+}
+
+# Parameter version tracking (mutable list for cross-module updates)
+param_version = [0]
+param_lock = threading.Lock()
+
+# Tune history: each entry is a dict with version, param changed, old val, new val, result
+param_history = []
+
+# Performance metrics per review cycle
+perf_metrics = {
+    "sharpe_ratio": 0.0,
+    "profit_factor": 0.0,
+    "win_rate": 0.0,
+    "avg_win": 0.0,
+    "avg_loss": 0.0,
+    "total_trades": 0,
+    "net_pnl": 0.0,
+    "max_drawdown": 0.0,
+    "expectancy": 0.0,
+    "best_pattern": "",
+    "worst_pattern": "",
+    "last_review_trades": 0,
+    "goal_sharpe_progress": 0.0,
+    "goal_winrate_progress": 0.0,
+    "goal_return_progress": 0.0,
+    "goal_dd_status": "OK",
+    "goal_dd_pct": 0.0,
+}
+perf_lock = threading.Lock()
+
+# Hypothesis from last review cycle
+last_hypothesis = ""
+last_hypothesis_lock = threading.Lock()
 
 
 # ─── Init / Teardown ─────────────────────────────────────────────────────────
@@ -61,6 +108,8 @@ def init_symbol_state(sym):
             "signal": None, "direction": 0, "tp": 0.0, "sl": 0.0,
             "manipulation_range": 0.0, "pattern_type": "",
             "last_entry_signal": None,
+            "score": 0.0, "num_signals": 0,
+            "trend": "", "vol_label": "",
         }
         daily_atr[sym] = 0.0
         daily_atr_threshold[sym] = 0.0
@@ -70,15 +119,18 @@ def init_symbol_state(sym):
         last_15m_time[sym] = None
         open_trades[sym] = []
         indicators[sym] = {"daily_atr": 0.0, "daily_atr_threshold": 0.0,
-                          "5m_atr14": 0.0}
+                          "15m_atr14": 0.0}
+        last_trade_close_time[sym] = 0.0
 
 
 def remove_symbol_state(sym):
     """Remove all state entries for a symbol."""
     for d in [candles, ticker, signal_state, daily_atr, daily_atr_threshold,
               manipulation_candle, manipulation_active, reversal_pattern,
-              last_15m_time, open_trades, indicators]:
+              last_15m_time, open_trades, indicators, last_trade_close_time]:
         d.pop(sym, None)
+    with capital_lock:
+        capital.pop(sym, None)
 
 
 def ensure_capital(sym):
@@ -105,3 +157,5 @@ def broadcast_sse(data):
                 q.put_nowait(data)
             except Exception:
                 pass
+
+# -- Auto-trim: keep event log manageable -- (handled in strategy.py log_event)

@@ -8,10 +8,10 @@ from datetime import datetime
 import requests
 import websocket
 
-from app.config import MANIPULATION_THRESHOLD, CANDLE_LIMIT, SYMBOL_DISPLAY
+from app.config import CANDLE_LIMIT, SYMBOL_DISPLAY
 from app.state import (SYMBOLS, candles, ticker, daily_atr, daily_atr_threshold,
                         indicators, state_lock, ws_stop_event, ws_thread_ref,
-                        ws_lock, broadcast_sse)
+                        ws_lock, ws_generation, broadcast_sse)
 from app.indicators import atr
 
 
@@ -28,11 +28,12 @@ def _price_precision(price):
 def bootstrap_historical_candles(sym):
     from app.strategy import log_event
     symbol = sym.upper()
-    for tf_key, interval in [("5m", "5m"), ("15m", "15m")]:
+    session = requests.Session()
+    for tf_key, interval in [("15m", "15m")]:  # only bootstrap what strategy needs
         try:
             url = (f"https://api.binance.com/api/v3/klines"
                    f"?symbol={symbol}&interval={interval}&limit={CANDLE_LIMIT}")
-            resp = requests.get(url, timeout=15)
+            resp = session.get(url, timeout=5)
             if resp.status_code != 200:
                 log_event(f"Bootstrap {sym} {tf_key} failed: "
                           f"HTTP {resp.status_code}", "WARN")
@@ -62,12 +63,21 @@ def bootstrap_historical_candles(sym):
                       f"for {symbol}", "SYSTEM")
         except Exception as e:
             log_event(f"Bootstrap {sym} {tf_key} error: {e}", "WARN")
+    session.close()
     compute_daily_atr(sym)
 
 
 def bootstrap_all():
-    for sym in SYMBOLS:
-        bootstrap_historical_candles(sym)
+    """Bootstrap all symbols in parallel — much faster than sequential."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futs = {ex.submit(bootstrap_historical_candles, sym): sym for sym in SYMBOLS}
+        for f in as_completed(futs, timeout=30):
+            try:
+                f.result()
+            except Exception as e:
+                from app.strategy import log_event
+                log_event(f"Bootstrap {futs[f]} failed: {e}", "WARN")
 
 
 # ─── Daily ATR ─────────────────────────────────────────────────────────────────
@@ -78,24 +88,27 @@ def compute_daily_atr(sym):
     try:
         url = (f"https://api.binance.com/api/v3/klines"
                f"?symbol={symbol}&interval=1d&limit=30")
-        resp = requests.get(url, timeout=15)
+        resp = requests.get(url, timeout=5)
         if resp.status_code != 200:
             log_event(f"Daily ATR {sym} fetch failed: "
                       f"HTTP {resp.status_code}", "WARN")
-            return _fallback_atr(sym)
+            _fallback_atr(sym)
+            return
         data = resp.json()
         if len(data) < 15:
             log_event(f"Daily ATR {sym}: only {len(data)} daily candles, "
                       f"falling back to 15m calc", "WARN")
-            return _fallback_atr(sym)
+            _fallback_atr(sym)
+            return
         highs = [float(k[2]) for k in data]
         lows = [float(k[3]) for k in data]
         closes = [float(k[4]) for k in data]
         d_atr = atr(highs, lows, closes, 14)
         if d_atr <= 0:
             log_event(f"Daily ATR {sym} = 0, falling back to 15m calc", "WARN")
-            return _fallback_atr(sym)
-        threshold = d_atr * MANIPULATION_THRESHOLD
+            _fallback_atr(sym)
+            return
+        threshold = d_atr * 0.05  # 5% of daily ATR for informational display
         _set_atr(sym, d_atr, threshold)
         return
     except Exception as e:
@@ -122,7 +135,7 @@ def _fallback_atr(sym):
         return
     # Scale: 15m ATR ≈ daily ATR / sqrt(96) since there are 96 15m bars per day
     daily_est = atr_val * (96 ** 0.5)
-    threshold = daily_est * MANIPULATION_THRESHOLD
+    threshold = daily_est * 0.05  # 5% of daily ATR for informational display
     _set_atr(sym, daily_est, threshold)
     log_event(f"{sym} Daily ATR(14)=${daily_est:.{_price_precision(daily_est)}f} "
               f"(from 15m fallback) | "
@@ -171,11 +184,12 @@ def on_message(ws, raw):
 
         if stream == f"{sl}@miniTicker":
             price = float(msg.get("c", 0))
+            change_pct = float(msg.get("P", 0))
             prev_price = 0.0
             with state_lock:
                 prev_price = ticker[sym]["price"]
                 ticker[sym]["price"] = price
-                ticker[sym]["change_pct"] = float(msg.get("P", 0))
+                ticker[sym]["change_pct"] = change_pct
                 ticker[sym]["high"] = float(msg.get("h", 0))
                 ticker[sym]["low"] = float(msg.get("l", 0))
                 ticker[sym]["volume"] = float(msg.get("v", 0))
@@ -185,7 +199,7 @@ def on_message(ws, raw):
                     "event": "ticker",
                     "symbol": sym,
                     "price": price,
-                    "change_pct": ticker[sym]["change_pct"],
+                    "change_pct": change_pct,
                     "prev_price": prev_price,
                 })
             return
@@ -257,24 +271,35 @@ def on_open(ws):
 
 
 def _run_ws_forever():
+    my_gen = ws_generation  # capture the generation at thread start
     ws_url = make_ws_url()
+    backoff = 5  # seconds, doubles on each failure
+    max_backoff = 120
     while not ws_stop_event.is_set():
+        # If a newer generation exists, this thread is stale — exit
+        if ws_generation != my_gen:
+            break
         try:
             ws = websocket.WebSocketApp(ws_url,
                                         on_message=on_message,
                                         on_error=on_error,
                                         on_close=on_close,
                                         on_open=on_open)
-            ws.run_forever(ping_interval=30, ping_timeout=20)
+            # reconnect=0: disable the library's internal reconnect loop
+            # so the app's own while loop is the sole reconnection mechanism
+            ws.run_forever(ping_interval=30, ping_timeout=20, reconnect=0)
+            # Reset backoff on successful connection+disconnect
+            backoff = 5
             # After graceful close, wait before reconnect
-            time.sleep(5)
+            time.sleep(backoff)
         except Exception as e:
             if ws_stop_event.is_set():
                 break
             from app.strategy import log_event
             log_event(f"WebSocket connect failed: {e}. "
-                      f"Retrying in 5s...", "ERROR")
-            time.sleep(5)
+                      f"Retrying in {backoff}s...", "ERROR")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
 
 
 def start_websocket():
@@ -287,10 +312,12 @@ def start_websocket():
 
 
 def _trigger_ws_restart():
-    """Signal WS to restart with new symbol list."""
+    """Signal WS to restart with new symbol list — uses generation counter."""
     from app.strategy import log_event
+    global ws_generation
     with ws_lock:
         ws_stop_event.set()
+        ws_generation += 1  # bump generation — old thread will exit on next check
     time.sleep(0.5)
     ws_stop_event.clear()
     t = threading.Thread(target=start_websocket, daemon=True,
