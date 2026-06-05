@@ -432,8 +432,12 @@ def _compute_goals(metrics):
     }
 
 
-def _run_review_cycle():
-    """Run one self-review cycle — analyze, hypothesize, change one param."""
+def _run_review_cycle(force=False):
+    """Run one self-review cycle — analyze, hypothesize, change one param.
+    
+    Args:
+        force: If True, skip the interval check (used for consecutive-loss trigger).
+    """
     total_closed = 0
     with state_lock:
         total_closed = len(closed_trades)
@@ -445,7 +449,7 @@ def _run_review_cycle():
         last_review = perf_metrics.get("last_review_trades", 0)
 
     new_trades_count = total_closed - last_review
-    if new_trades_count < SELF_LEARN_REVIEW_INTERVAL:
+    if not force and new_trades_count < SELF_LEARN_REVIEW_INTERVAL:
         return
 
     with state_lock:
@@ -543,6 +547,15 @@ def _save_trade_score_for_trade(trade, sym):
             all_closed = list(closed_trades)
         regime = _determine_regime(all_closed[-20:]) if len(all_closed) >= 20 else "neutral"
         score = _score_trade(trade)
+
+        # Check for 5 consecutive losses -> trigger immediate self-improvement
+        if len(all_closed) >= 5:
+            last_5 = all_closed[-5:]
+            if all(t["pnl"] < 0 for t in last_5):
+                log_event(
+                    "[SELF-LEARN] 5 consecutive losses detected — "
+                    "triggering immediate review!", "WARN")
+                _run_review_cycle(force=True)
 
         trade_score = {
             "trade_id": trade["id"],
