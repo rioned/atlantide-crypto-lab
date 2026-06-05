@@ -116,7 +116,7 @@ def startup():
         log_event(f"CRYPTO LAB 2 started on 0.0.0.0:9090 — "
                   f"{len(SYMBOLS)} symbols, 10% risk/trade", "SYSTEM")
         log_event(f"[SELF-LEARN] Self-improving agent enabled — "
-                  f"reviews every {20} trades, changes one parameter at a time",
+                  f"reviews every {10} trades, changes one parameter at a time",
                   "SYSTEM")
 
     # Run bootstrap in a daemon thread so it never blocks startup
