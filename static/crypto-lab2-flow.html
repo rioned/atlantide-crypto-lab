@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>crypto-lab2 — System Flow</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#020617;font-family:'JetBrains Mono',monospace;color:#e2e8f0;padding:40px}
+.container{max-width:1200px;margin:0 auto}
+.header{margin-bottom:40px}
+.header h1{font-size:20px;font-weight:700;color:#f1f5f9;display:flex;align-items:center;gap:12px}
+.header .dot{width:10px;height:10px;border-radius:50%;background:#22d3ee;animation:pulse 2s infinite}
+.header .subtitle{font-size:11px;color:#64748b;margin-top:6px}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.diagram-card{background:#0f172a;border:1px solid #1e293b;border-radius:12px;padding:24px;margin-bottom:32px}
+.diagram-card svg{display:block;margin:0 auto;max-width:100%}
+.steps{margin-top:32px}
+.step-group{margin-bottom:32px;border:1px solid #1e293b;border-radius:8px;padding:20px}
+.step-group h2{font-size:13px;color:#22d3ee;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+.step-group h2 .num{background:#22d3ee20;color:#22d3ee;border:1px solid #22d3ee40;border-radius:4px;padding:2px 8px;font-size:11px}
+.step{display:grid;grid-template-columns:40px 1fr;gap:12px;margin-bottom:16px;padding:12px;border:1px solid #1e293b;border-radius:6px;background:#0f172a80}
+.step:last-child{margin-bottom:0}
+.step-num{font-size:14px;font-weight:700;color:#22d3ee;background:#22d3ee10;border-radius:4px;display:flex;align-items:center;justify-content:center;height:28px;width:28px}
+.step-content{font-size:11px;line-height:1.6}
+.step-content .label{font-weight:600;color:#e2e8f0}
+.step-content .detail{color:#94a3b8}
+.step-content .impact{color:#fbbf24;font-size:10px;margin-top:4px;padding:4px 8px;background:#fbbf2410;border-radius:4px;border:1px solid #fbbf2420}
+.step-content .data-flow{color:#34d399;font-size:10px}
+.arrow{color:#64748b;text-align:center;font-size:10px;padding:4px 0}
+.card-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-top:24px}
+.card{background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:16px}
+.card h3{font-size:11px;color:#22d3ee;margin-bottom:8px}
+.card ul{list-style:none;padding:0}
+.card li{font-size:10px;color:#94a3b8;padding:3px 0;display:flex;align-items:center;gap:6px}
+.card li::before{content:'·';color:#22d3ee;font-weight:700}
+</style>
+</head>
+<body>
+<div class="container">
+<div class="header">
+  <h1><span class="dot"></span> crypto-lab2 — Trading System Flow</h1>
+  <div class="subtitle">atlantide-crypto-lab · Hybrid Scoring + Candlestick Pattern Scalp · 15m timeframe · loop every 1s</div>
+</div>
+
+<div class="diagram-card">
+<svg viewBox="0 0 1100 950" width="1100" height="950" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 Z" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 Z" fill="#34d399"/>
+    </marker>
+    <marker id="arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 Z" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 Z" fill="#fbbf24"/>
+    </marker>
+    <marker id="arrow-violet" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 Z" fill="#a78bfa"/>
+    </marker>
+  </defs>
+
+  <rect width="1100" height="950" fill="url(#grid)"/>
+
+  <!-- === BOUNDARY: External === -->
+  <rect x="30" y="10" width="280" height="150" rx="8" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.4"/>
+  <text x="40" y="30" fill="#94a3b8" font-size="9" opacity="0.6">DATA SOURCES</text>
+
+  <!-- === BOUNDARY: Strategy Engine === -->
+  <rect x="370" y="10" width="340" height="470" rx="8" fill="none" stroke="#22d3ee" stroke-width="1.5" stroke-dasharray="8,4" opacity="0.3"/>
+  <text x="380" y="30" fill="#22d3ee" font-size="9" opacity="0.6">STRATEGY ENGINE (runs every 1s)</text>
+
+  <!-- === BOUNDARY: Risk & Execution === -->
+  <rect x="370" y="500" width="340" height="320" rx="8" fill="none" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="8,4" opacity="0.3"/>
+  <text x="380" y="518" fill="#fbbf24" font-size="9" opacity="0.6">RISK &amp; EXECUTION (runs every 1s)</text>
+
+  <!-- === BOUNDARY: Self-Learning === -->
+  <rect x="770" y="10" width="300" height="280" rx="8" fill="none" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="8,4" opacity="0.3"/>
+  <text x="780" y="30" fill="#a78bfa" font-size="9" opacity="0.6">SELF-LEARNING (reviews every 10 trades / 60s)</text>
+
+  <!-- === COMPONENT: Binance API === -->
+  <rect x="50" y="50" width="240" height="50" rx="6" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="170" y="72" fill="#e2e8f0" font-size="11" text-anchor="middle">Binance WebSocket API</text>
+  <text x="170" y="86" fill="#94a3b8" font-size="8" text-anchor="middle">100 symbols · 15m + 5m candle stream</text>
+
+  <!-- === COMPONENT: Market Data === -->
+  <rect x="50" y="120" width="240" height="40" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="170" y="140" fill="#e2e8f0" font-size="10" text-anchor="middle">Candle Bootstrap &amp; Ticker</text>
+  <text x="170" y="153" fill="#94a3b8" font-size="8" text-anchor="middle">100 candles × 20 symbols on startup</text>
+
+  <!-- Arrow: API → Market Data -->
+  <line x1="170" y1="100" x2="170" y2="118" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Arrow: Market Data → Engine -->
+  <path d="M 290 140 L 370 140" fill="none" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-green)" stroke-dasharray="4,2"/>
+  <text x="330" y="130" fill="#34d399" font-size="7" text-anchor="middle">candles[][15m]</text>
+
+  <!-- === COMPONENT: Indicators === -->
+  <rect x="390" y="55" width="160" height="36" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="470" y="73" fill="#e2e8f0" font-size="10" text-anchor="middle">compute_indicators()</text>
+  <text x="470" y="86" fill="#94a3b8" font-size="7" text-anchor="middle">ATR(14) · RSI(14) · MACD(12,26,9) · EMA(9/21/20/50)</text>
+
+  <!-- === COMPONENT: Pattern Detection === -->
+  <rect x="390" y="105" width="160" height="36" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="470" y="123" fill="#e2e8f0" font-size="10" text-anchor="middle">Candlestick Patterns</text>
+  <text x="470" y="136" fill="#94a3b8" font-size="7" text-anchor="middle">Hammer · Shooting Star · Engulfing · Doji</text>
+
+  <!-- Arrow: Indicators → Patterns -->
+  <line x1="470" y1="91" x2="470" y2="103" stroke="#22d3ee" stroke-width="1" marker-end="url(#arrow-cyan)"/>
+
+  <!-- === COMPONENT: Scoring === -->
+  <rect x="390" y="155" width="300" height="48" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="540" y="173" fill="#e2e8f0" font-size="10" text-anchor="middle">score_entry() — Multi-Signal Aggregation</text>
+  <text x="540" y="187" fill="#94a3b8" font-size="7" text-anchor="middle">Hammer(+2.5) + ShootingStar(−2.5) + Engulfing(±2.0) + EMACross(±2.0)</text>
+  <text x="540" y="199" fill="#94a3b8" font-size="7" text-anchor="middle">+ EMAPos(±1.0) + RSIBounce(±1.5×1.0–1.3) + MACD(±1.0×0.5–1.5) + Volume(±0.5)</text>
+
+  <!-- Arrow: Patterns → Scoring -->
+  <line x1="470" y1="141" x2="470" y2="153" stroke="#22d3ee" stroke-width="1" marker-end="url(#arrow-cyan)"/>
+
+  <!-- === COMPONENT: Regime Detection === -->
+  <rect x="580" y="55" width="110" height="36" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="635" y="73" fill="#e2e8f0" font-size="9" text-anchor="middle">Regime Detection</text>
+  <text x="635" y="86" fill="#94a3b8" font-size="7" text-anchor="middle">Trend · Volatility</text>
+
+  <!-- Arrow: Indicators → Regime -->
+  <line x1="550" y1="73" x2="578" y2="73" stroke="#22d3ee" stroke-width="1" marker-end="url(#arrow-cyan)"/>
+
+  <!-- Arrow: Regime → Scoring -->
+  <path d="M 635 91 L 635 155" fill="none" stroke="#22d3ee" stroke-width="1" stroke-dasharray="3,2" marker-end="url(#arrow-cyan)"/>
+
+  <!-- === COMPONENT: Candle Pattern Dominance Check (NEW ORDER: BEFORE threshold) === -->
+  <rect x="390" y="218" width="300" height="36" rx="6" fill="rgba(251,191,36,0.15)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="540" y="236" fill="#fbbf24" font-size="10" text-anchor="middle">1. Candle Pattern Dominance Check</text>
+  <text x="540" y="249" fill="#94a3b8" font-size="7" text-anchor="middle">Dominant candle contradicts total score → ×0.3 penalty</text>
+
+  <line x1="540" y1="203" x2="540" y2="216" stroke="#22d3ee" stroke-width="1" marker-end="url(#arrow-cyan)"/>
+
+  <!-- === COMPONENT: Entry Threshold Check (MOVED: now BEFORE Regime Filter) === -->
+  <rect x="390" y="268" width="300" height="36" rx="6" fill="rgba(251,191,36,0.15)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="540" y="286" fill="#fbbf24" font-size="10" text-anchor="middle">2. Entry Threshold Check</text>
+  <text x="540" y="299" fill="#94a3b8" font-size="7" text-anchor="middle">abs(score) >= threshold (tunable 2.0–6.0, default 3.5)</text>
+
+  <line x1="540" y1="254" x2="540" y2="266" stroke="#fbbf24" stroke-width="1" marker-end="url(#arrow-amber)"/>
+
+  <!-- === COMPONENT: Regime Direction Filter (MOVED: now AFTER threshold) === -->
+  <rect x="390" y="318" width="300" height="36" rx="6" fill="rgba(251,191,36,0.15)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="540" y="336" fill="#fbbf24" font-size="10" text-anchor="middle">3. Regime Direction Filter</text>
+  <text x="540" y="349" fill="#94a3b8" font-size="7" text-anchor="middle">Downtrend+normal vol → only SHORT · Uptrend+normal vol → only LONG</text>
+
+  <line x1="540" y1="304" x2="540" y2="316" stroke="#fbbf24" stroke-width="1" marker-end="url(#arrow-amber)"/>
+
+  <!-- === COMPONENT: TP/SL Calculation === -->
+  <rect x="390" y="368" width="300" height="48" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="540" y="386" fill="#e2e8f0" font-size="10" text-anchor="middle">4. TP/SL Calculation</text>
+  <text x="540" y="400" fill="#94a3b8" font-size="7" text-anchor="middle">SL = entry ± 1.5×ATR · clamped to candle range</text>
+  <text x="540" y="412" fill="#94a3b8" font-size="7" text-anchor="middle">TP = entry ± (SL_distance × 2.0) — RR ratio FIXED at 2.0</text>
+
+  <line x1="540" y1="354" x2="540" y2="366" stroke="#22d3ee" stroke-width="1" marker-end="url(#arrow-cyan)"/>
+
+  <!-- === COMPONENT: Anti-Trend Filter (NEW: after TP/SL) === -->
+  <rect x="390" y="430" width="300" height="36" rx="6" fill="rgba(251,191,36,0.15)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="540" y="448" fill="#fbbf24" font-size="10" text-anchor="middle">5. Anti-Trend Filter (EMA50 slope ~2h)</text>
+  <text x="540" y="461" fill="#94a3b8" font-size="7" text-anchor="middle">Opposes medium-term trend → ×0.5 penalty · Aligns = pass</text>
+
+  <line x1="540" y1="416" x2="540" y2="428" stroke="#22d3ee" stroke-width="1" marker-end="url(#arrow-cyan)"/>
+
+  <!-- Arrow: Strategy output → Execution boundary -->
+  <line x1="540" y1="466" x2="540" y2="518" stroke="#22d3ee" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arrow-cyan)"/>
+  <text x="550" y="495" fill="#22d3ee" font-size="8">signal_state[].signal = LONG/SHORT</text>
+
+  <!-- === EXECUTION BLOCK: Cooldown === -->
+  <rect x="390" y="530" width="300" height="28" rx="6" fill="rgba(251,191,36,0.1)" stroke="#fbbf24" stroke-width="1"/>
+  <text x="540" y="548" fill="#fbbf24" font-size="9" text-anchor="middle">1. Cooldown Check (15 min per symbol)</text>
+
+  <!-- === EXECUTION BLOCK: SL Pause === -->
+  <rect x="390" y="566" width="300" height="28" rx="6" fill="rgba(251,191,36,0.1)" stroke="#fbbf24" stroke-width="1"/>
+  <text x="540" y="584" fill="#fbbf24" font-size="9" text-anchor="middle">2. Consecutive SL Pause (5 SLs → 1h pause per symbol)</text>
+
+  <line x1="540" y1="558" x2="540" y2="564" stroke="#fbbf24" stroke-width="1" marker-end="url(#arrow-amber)"/>
+
+  <!-- === EXECUTION BLOCK: Loss Filter === -->
+  <rect x="390" y="602" width="300" height="28" rx="6" fill="rgba(251,191,36,0.1)" stroke="#fbbf24" stroke-width="1"/>
+  <text x="540" y="620" fill="#fbbf24" font-size="9" text-anchor="middle">3. Open Positions Loss Filter (≥50% losing → skip)</text>
+
+  <line x1="540" y1="594" x2="540" y2="600" stroke="#fbbf24" stroke-width="1" marker-end="url(#arrow-amber)"/>
+
+  <!-- === EXECUTION BLOCK: 5-Loss === -->
+  <rect x="390" y="638" width="300" height="28" rx="6" fill="#fbbf2415" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="540" y="656" fill="#fbbf24" font-size="9" text-anchor="middle">4. Global 5-Loss Suspension (5 losses → 2h freeze · fingerprint guard)</text>
+
+  <line x1="540" y1="630" x2="540" y2="636" stroke="#fbbf24" stroke-width="1" marker-end="url(#arrow-amber)"/>
+
+  <!-- === EXECUTION BLOCK: Position Sizing === -->
+  <rect x="390" y="680" width="300" height="36" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="540" y="698" fill="#e2e8f0" font-size="10" text-anchor="middle">5. Position Sizing &amp; Open Trade</text>
+  <text x="540" y="711" fill="#94a3b8" font-size="7" text-anchor="middle">Risk=capital×10% · conf_mult(0.75/1.0/1.5) · vol_mult(0.5/1.0/1.2) · 1 trade/symbol</text>
+
+  <line x1="540" y1="666" x2="540" y2="678" stroke="#34d399" stroke-width="1" marker-end="url(#arrow-green)"/>
+
+  <!-- === EXECUTION BLOCK: Monitor === -->
+  <rect x="390" y="730" width="300" height="36" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="540" y="748" fill="#e2e8f0" font-size="10" text-anchor="middle">6. Monitor Open Trades (every 1s)</text>
+  <text x="540" y="761" fill="#94a3b8" font-size="7" text-anchor="middle">TP · SL · Trailing Stop (activate@50%, trail@30% of TP dist, capped@breakeven)</text>
+
+  <line x1="540" y1="716" x2="540" y2="728" stroke="#34d399" stroke-width="1" marker-end="url(#arrow-green)"/>
+
+  <!-- === EXECUTION BLOCK: Close & Log === -->
+  <rect x="390" y="780" width="300" height="30" rx="6" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1"/>
+  <text x="540" y="799" fill="#a78bfa" font-size="9" text-anchor="middle">Trade Close → closed_trades[] + save_state() + conditions snapshot</text>
+
+  <line x1="540" y1="766" x2="540" y2="778" stroke="#a78bfa" stroke-width="1" marker-end="url(#arrow)"/>
+
+  <!-- === SELF-LEARNING: Review Cycle === -->
+  <rect x="790" y="60" width="260" height="42" rx="6" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="920" y="78" fill="#e2e8f0" font-size="10" text-anchor="middle">Review Cycle (every 10 new trades)</text>
+  <text x="920" y="92" fill="#94a3b8" font-size="7" text-anchor="middle">Sharpe · Win Rate · Profit Factor · Expectancy · DD</text>
+
+  <!-- === SELF-LEARNING: Per-Type === -->
+  <rect x="790" y="115" width="260" height="42" rx="6" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="920" y="133" fill="#e2e8f0" font-size="10" text-anchor="middle">Per-Entry-Type Performance</text>
+  <text x="920" y="147" fill="#94a3b8" font-size="7" text-anchor="middle">HAMMER · SHOOTING_STAR · ENGULFING · EMA_CROSS · RSI_BOUNCE · MOMENTUM</text>
+
+  <line x1="920" y1="102" x2="920" y2="113" stroke="#a78bfa" stroke-width="1" marker-end="url(#arrow-violet)"/>
+
+  <!-- === SELF-LEARNING: Param Tuning === -->
+  <rect x="790" y="170" width="260" height="56" rx="6" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="920" y="188" fill="#e2e8f0" font-size="10" text-anchor="middle">Parameter Tuning (one at a time)</text>
+  <text x="920" y="202" fill="#94a3b8" font-size="7" text-anchor="middle">entry_threshold (2.0–6.0) · wick_ratio (1.2–4.0)</text>
+  <text x="920" y="214" fill="#94a3b8" font-size="7" text-anchor="middle">risk_pct (5%–20%) · RR ratio FIXED at 2.0 (removed from tunables)</text>
+
+  <line x1="920" y1="157" x2="920" y2="168" stroke="#a78bfa" stroke-width="1" marker-end="url(#arrow-violet)"/>
+
+  <!-- === SELF-LEARNING: Forced Review === -->
+  <rect x="790" y="240" width="260" height="36" rx="6" fill="rgba(251,146,60,0.15)" stroke="#fb923c" stroke-width="1.5"/>
+  <text x="920" y="258" fill="#fb923c" font-size="9" text-anchor="middle">5-Loss Forced Review Trigger</text>
+  <text x="920" y="270" fill="#94a3b8" font-size="7" text-anchor="middle">5 consecutive losses → immediate forced review (10min throttle)</text>
+
+  <line x1="920" y1="226" x2="920" y2="238" stroke="#a78bfa" stroke-width="1" marker-end="url(#arrow-violet)"/>
+
+  <!-- Arrow: Self-Learning → Engine -->
+  <path d="M 790 200 L 700 200 L 700 290 L 690 290" fill="none" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arrow-violet)"/>
+  <text x="750" y="192" fill="#a78bfa" font-size="7" text-anchor="middle">active_params[]</text>
+  <text x="750" y="204" fill="#94a3b8" font-size="6" text-anchor="middle">(hot-reloadable)</text>
+
+  <!-- Arrow: Close Feedback → Self-Learning -->
+  <path d="M 690 795 L 790 795 L 790 260 L 800 260" fill="none" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,2" marker-end="url(#arrow-violet)"/>
+  <text x="740" y="788" fill="#a78bfa" font-size="7" text-anchor="middle">trade scores + conditions</text>
+
+  <!-- Arrow: Close Feedback → Forced Review -->
+  <path d="M 690 805 L 960 805 L 960 265 L 960 278" fill="none" stroke="#fb923c" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+
+  <!-- Legend -->
+  <rect x="790" y="780" width="280" height="110" rx="6" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+  <text x="800" y="798" fill="#64748b" font-size="9">Legend</text>
+  <rect x="800" y="806" width="12" height="12" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="818" y="816" fill="#94a3b8" font-size="8">Strategy / Signal Processing</text>
+  <rect x="800" y="824" width="12" height="12" rx="2" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="818" y="834" fill="#94a3b8" font-size="8">Execution / Trading</text>
+  <rect x="800" y="842" width="12" height="12" rx="2" fill="#fbbf2415" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="818" y="852" fill="#94a3b8" font-size="8">Risk Filters / Circuit Breakers</text>
+  <rect x="930" y="806" width="12" height="12" rx="2" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="948" y="816" fill="#94a3b8" font-size="8">Self-Learning / DB</text>
+  <rect x="930" y="824" width="12" height="12" rx="2" fill="rgba(251,146,60,0.15)" stroke="#fb923c" stroke-width="1.5"/>
+  <text x="948" y="834" fill="#94a3b8" font-size="8">Forced Review Trigger</text>
+</svg>
+</div>
+
+<!-- ========== STEP-BY-STEP ========== -->
+
+<h2 style="font-size:14px;color:#f1f5f9;margin-bottom:16px">Step-by-Step Execution Flow</h2>
+
+<div class="step-group">
+<h2><span class="num">PHASE 1</span> Data Collection (every 1s)</h2>
+
+<div class="step">
+  <div class="step-num">1</div>
+  <div class="step-content">
+    <div class="label">WebSocket stream pushes 15m candle closes</div>
+    <div class="detail">Binance WebSocket delivers real-time 15m and 5m candles for 20 active symbols (60 total streams). Each closed 15m candle is appended to <code>candles[sym]["15m"]</code>. Ticker prices, highs, lows, volumes updated in shared state.</div>
+    <div class="data-flow">→ Ticker prices, highs, lows, volumes updated in shared state</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="step-num">2</div>
+  <div class="step-content">
+    <div class="label">Market data bootstrap (on startup only)</div>
+    <div class="detail">On first launch, REST API fetches 100 historical 15m candles per symbol. Gives enough data for EMA(50) + ATR(14) + RSI(14) calculations immediately.</div>
+    <div class="impact">Impact: Without this, strategy cannot run until ~12 hours of candles accumulate naturally.</div>
+  </div>
+</div>
+</div>
+
+<div class="step-group">
+<h2><span class="num">PHASE 2</span> Strategy Evaluation (every 1s, per symbol)</h2>
+
+<div class="step">
+  <div class="step-num">3</div>
+  <div class="step-content">
+    <div class="label">compute_indicators() — Technical Analysis</div>
+    <div class="detail">From 30 closed 15m candles, calculate: ATR(14) for SL distance, RSI(14) for overbought/oversold, MACD(12,26,9) histogram for momentum, EMA(9) and EMA(21) for crossovers, EMA(20) for trend direction, EMA(50) for longer-term trend filter. Volume SMA(20) for volume spike detection. Volatility classification (low/normal/high) via ATR percentile over 50 periods.</div>
+    <div class="data-flow">→ indicators[sym] dict populated for display and downstream scoring</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="step-num">4</div>
+  <div class="step-content">
+    <div class="label">Candlestick Pattern Detection</div>
+    <div class="detail">Scan last 3 closed candles for: <b>Hammer</b> (long lower wick ≥ 1.5×body, tiny upper wick → LONG), <b>Shooting Star</b> (long upper wick ≥ 1.5×body, tiny lower wick → SHORT), <b>Engulfing</b> (current body fully engulfs previous body ×1.3 → direction of engulf), <b>Doji</b> (body &lt;10% of range → skip pattern). Wick ratio tunable by self-learning (1.2–4.0).</div>
+    <div class="impact">Impact: Doji-cancelled candles excluded from pattern scoring. First detected pattern wins (priority: Hammer → Star, then Engulfing).</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="step-num">5</div>
+  <div class="step-content">
+    <div class="label">score_entry() — Multi-Signal Aggregation</div>
+    <div class="detail">Sum weighted scores from ALL active signal types into a total score (−8.0 to +8.0 range):</div>
+    <div class="detail"><b>Hammer:</b> +2.5 · <b>Shooting Star:</b> −2.5 · <b>Engulfing:</b> ±2.0 · <b>EMA Cross (fresh):</b> ±2.0 · <b>EMA Position (no cross):</b> ±1.0 · <b>RSI Bounce:</b> ±1.5 (scaled ×1.0–1.3 by depth) · <b>MACD Histogram:</b> ±1.0 (scaled ×0.5–1.5 by magnitude) · <b>Volume Spike:</b> ±0.5 (directionless, amplifies existing bias)</div>
+    <div class="impact">Impact: Volume signal signs itself based on total score (directionless → takes aggregate direction). EMA Position fires when no fresh EMA cross but EMA9 > EMA21 (or vice versa).</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="step-num">6</div>
+  <div class="step-content">
+    <div class="label">Candle Pattern Dominance Check — NOW BEFORE threshold</div>
+    <div class="detail">If the strongest signal is a candle pattern (Hammer/Star/Engulfing) but total score points the OPPOSITE direction → total score penalized by 70% (×0.3). This prevents conflicting signal pollution — e.g. a Hammer (+2.5) accompanied by conflicting negative signals (−3.0 total) gets crushed to −0.9.</div>
+    <div class="impact">Impact: <b>MOVED BEFORE entry threshold check</b> in this update. Previously it was after — now the penalty is applied before the threshold gate. A candle pattern's direction must reinforce the aggregate, not fight it.</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="step-num">7</div>
+  <div class="step-content">
+    <div class="label">Entry Threshold Check</div>
+    <div class="detail">If abs(total_score) >= entry_threshold (tunable 2.0–6.0, default 3.5) → signal passes to downstream filters. Otherwise → signal discarded.</div>
+    <div class="impact">Impact: Raising threshold = fewer trades with higher conviction. Lowering = more trades with more noise. Self-learning tunes this after every review cycle.</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="step-num">8</div>
+  <div class="step-content">
+    <div class="label">Regime Direction Filter — MOVED AFTER threshold</div>
+    <div class="detail">Downtrend + normal volatility → ONLY SHORT passes (returns None for LONG). Uptrend + normal volatility → ONLY LONG passes. Ranging or high/low volatility → both directions allowed. This is a FULL BLOCK (returns None), not a penalty.</div>
+    <div class="impact">Impact: <b>New position in this update.</b> Previously there was no regime direction filter. Now it sits AFTER the threshold check — only signals that already meet the score threshold face this direction constraint. In a strong downtrend, bullish signals are BLOCKED entirely.</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="step-num">9</div>
+  <div class="step-content">
+    <div class="label">TP/SL Calculation</div>
+    <div class="detail"><b>SL:</b> entry ± 1.5 × ATR(14) on 15m timeframe. Clamped to candle pattern range so SL cannot be placed absurdly far. <b>TP:</b> entry ± (SL_distance × RR_RATIO) where RR_RATIO = 2.0. <b>RR ratio is now FIXED at 2.0</b> — no longer tunable by self-learning (was previously hot-reloadable via get_effective_param("rr_ratio")).</div>
+    <div class="impact">Impact: RR ratio removed from self-learning tunables. Previously had range 1.5–3.5. Now permanently fixed at 1:2. SL widened from 1.0× to 1.5× ATR to reduce false stop-outs on volatile 15m candles.</div>
+    <div class="data-flow">→ signal_state[sym] set: signal=LONG/SHORT, tp, sl, score, entry_type, trend, vol_label</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="step-num">10</div>
+  <div class="step-content">
+    <div class="label">Anti-Trend Filter (EMA50 slope ~2h) — NEW</div>
+    <div class="detail">New filter: if EMA50 slope over 8 periods (~2 hours) is bearish but signal is LONG → score halved (×0.5). If EMA50 is bullish but signal is SHORT → score halved. Requires 58+ data points to activate. This is a PENALTY, not a full block.</div>
+    <div class="impact">Impact: <b>NEW in this update.</b> Medium-term trend override using EMA50. Prevents trading against the dominant 2h direction. Unlike the Regime Direction Filter (which blocks entirely), this only PENALIZES (×0.5). Sits AFTER TP/SL calculation.</div>
+  </div>
+</div>
+</div>
+
+<div class="step-group">
+<h2><span class="num">PHASE 3</span> Risk Filters &amp; Execution (every 1s, per symbol)</h2>
+
+<div class="step">
+  <div class="step-num">11</div>
+  <div class="step-content">
+    <div class="label">Cooldown Check</div>
+    <div class="detail">If time since last trade close on this symbol &lt; 15 minutes → skip. Prevents rapid re-entry after a loss.</div>
+    <div class="impact">Impact: After a losing trade, system waits 15 min before considering the same symbol.</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="step-num">12</div>
+  <div class="step-content">
+    <div class="label">Consecutive SL Pause</div>
+    <div class="detail">If symbol hit 5 consecutive stop losses → pause for 1 hour. Counter resets on any TP or TRAILING close.</div>
+    <div class="impact">Impact: Per-symbol circuit breaker. Stops the system from bleeding on a particular asset. Counter tracked in <code>consecutive_sl_losses[sym]</code>.</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="step-num">13</div>
+  <div class="step-content">
+    <div class="label">Open Positions Loss Filter</div>
+    <div class="detail">If ≥50% of ALL open positions across ALL symbols have negative unrealized PnL → skip opening new trades entirely this tick. Requires at least 2 open trades to activate.</div>
+    <div class="impact">Impact: System-wide guard. Prevents stacking losses when most open trades are underwater.</div>
+  </div>
+</div>
+
+<div class="step" style="border-color:#fbbf24;background:#fbbf2408">
+  <div class="step-num" style="color:#fbbf24;background:#fbbf2415">14</div>
+  <div class="step-content">
+    <div class="label" style="color:#fbbf24">Global 5-Loss Suspension ← FINGERPRINT GUARD</div>
+    <div class="detail">If the last 5 closed trades across ALL symbols are ALL losses → suspend all new entries for 2 hours. <b>FINGERPRINT GUARD:</b> Records <code>suspension_fingerprint = len(closed_trades)</code> at trigger time. Uses strict > comparison — same set of trades can never trigger a suspension twice. Existing open positions continue resolving during freeze.</div>
+    <div class="impact">Impact: <b>BEFORE FIX:</b> After 2h expiry, same trades still present → immediate re-trigger → permanent freeze. <b>AFTER FIX:</b> Fingerprint uses strict > comparison plus separate guard expiry clear.</div>
+  </div>
+</div>
+</div>
+
+<div class="step-group">
+<h2><span class="num">PHASE 4</span> Trade Opening &amp; Monitoring</h2>
+
+<div class="step">
+  <div class="step-num">15</div>
+  <div class="step-content">
+    <div class="label">Position Sizing</div>
+    <div class="detail">Base risk = 10% of per-symbol capital. Adjusted by confidence multiplier (score 3.5–5.0 → 0.75×, 5.0–6.5 → 1.0×, 6.5+ → 1.5×). Volatility multiplier (high vol → 0.5×, low vol → 1.2×). Final notional = risk_amount / SL_distance_pct. Margin capped at 2× available balance. Leverage = 5×. Max 1 open trade per symbol.</div>
+    <div class="impact">Impact: Only 1 open trade per symbol. In high volatility, position size halves.</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="step-num">16</div>
+  <div class="step-content">
+    <div class="label">Open Trade — Record to State + DB</div>
+    <div class="detail">Trade dict appended to <code>open_trades[sym]</code>. Includes: id, entry price, direction, TP, SL, notional, margin, entry_fee, risk_amount, confidence_mult. <code>last_entry_signal</code> set to prevent re-entry on same signal. State saved to SQLite. Conditions snapshot captured.</div>
+    <div class="data-flow">→ state saved to atlantide.db · SSE broadcast to dashboard · conditions snapshot</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="step-num">17</div>
+  <div class="step-content">
+    <div class="label">Monitor Open Trades (every 1s)</div>
+    <div class="detail">For each open trade: update unrealized PnL from current price. Check TP hit → close. Check SL hit → close. Check trailing stop: activates at 50% of TP distance, trails at 30% behind price extreme, <b>capped at breakeven</b> — never lets trailing SL go below entry for LONG or above entry for SHORT.</div>
+    <div class="impact">Impact: Trailing stop capped at breakeven — guarantees trailing stops never turn a winning trade into a loss. Profitability check ensures TRAILING label only on genuinely profitable closes (not gap-through losses).</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="step-num">18</div>
+  <div class="step-content">
+    <div class="label">Trade Close — PnL &amp; Capital Update</div>
+    <div class="detail">Gross PnL = (exit−entry)/entry × direction × notional. Deduct entry_fee (0.05%) + exit_fee (0.05%). Update per-symbol capital: balance, total PnL, win/loss counters, peak, max drawdown. Consecutive SL counter incremented on SL closes, reset on TP/TRAILING. Trade scored + conditions snapshot captured.</div>
+    <div class="data-flow">→ closed_trades[] append · SQLite INSERT · SSE broadcast · Self-learning trigger · Conditions snapshot</div>
+  </div>
+</div>
+</div>
+
+<div class="step-group">
+<h2><span class="num">PHASE 5</span> Self-Learning (reviews every 10 new trades / 60s loop)</h2>
+
+<div class="step">
+  <div class="step-num">19</div>
+  <div class="step-content">
+    <div class="label">Compute Performance Metrics</div>
+    <div class="detail">Sharpe ratio, profit factor (gross_win/gross_loss), win rate, avg win/loss, expectancy, max drawdown. Per-entry-type breakdown: count, wins, PnL, win rate for each of HAMMER, SHOOTING_STAR, ENGULFING, EMA_CROSS, RSI_BOUNCE, MOMENTUM. Goal progress: Sharpe (target 1.5), Win Rate (target 40%), Monthly Return (target 10%).</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="step-num">20</div>
+  <div class="step-content">
+    <div class="label">Diagnose &amp; Tune One Parameter</div>
+    <div class="detail"><b>IF</b> any entry type has &lt;25% win rate after 5+ trades → raise entry_threshold. <b>ELIF</b> win rate &lt;28% + PF&lt;1.0 → raise entry_threshold. <b>ELIF</b> win rate ≥40% but PF&lt;1.5 → increase risk_pct. <b>ELIF</b> win rate &lt;32% + PF&lt;1.0 → raise wick_ratio. <b>ELSE</b> cycle to next param. Change by ±10% per iteration. If param stuck at bound → try next param.</div>
+    <div class="impact">Impact: Only ONE parameter changes per review. <b>RR ratio REMOVED from tunable params</b> — now FIXED at 2.0. Remaining params: entry_threshold (2.0–6.0), wick_ratio (1.2–4.0), risk_pct (5%–20%). Hot-reloadable via active_params[].</div>
+  </div>
+</div>
+
+<div class="step" style="border-color:#fb923c;background:#fb923c08">
+  <div class="step-num" style="color:#fb923c;background:#fb923c15">21</div>
+  <div class="step-content">
+    <div class="label" style="color:#fb923c">Forced Review on 5 Consecutive Losses</div>
+    <div class="detail">On every trade close, checks if the last 5 closed trades across ALL symbols are ALL losses. If so, triggers <b>immediate forced review cycle</b> (bypasses the 10-trade interval). Throttled: max once per 10 minutes.</div>
+    <div class="impact">Impact: Catches bleeding streaks in real-time rather than waiting for the next 10-trade review. 10-minute throttle prevents churn.</div>
+  </div>
+</div>
+</div>
+
+<!-- ========== SUMMARY CARDS ========== -->
+
+<div class="card-grid">
+  <div class="card">
+    <h3>Signal Types &amp; Weights</h3>
+    <ul>
+      <li>Hammer (bullish) +2.5</li>
+      <li>Shooting Star (bearish) −2.5</li>
+      <li>Engulfing ±2.0</li>
+      <li>EMA 9/21 Cross (fresh) ±2.0</li>
+      <li>EMA Position (no cross) ±1.0</li>
+      <li>RSI Bounce ±1.5 (scaled ×1.0–1.3)</li>
+      <li>MACD Histogram ±1.0 (scaled ×0.5–1.5)</li>
+      <li>Volume Spike ±0.5 (directionless)</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Circuit Breakers</h3>
+    <ul>
+      <li>15-min cooldown per symbol</li>
+      <li>5× consecutive SL → 1h pause per symbol</li>
+      <li>≥50% open positions underwater → skip new</li>
+      <li>5 straight losses → 2h freeze (fingerprint guard)</li>
+      <li>Candle dominance check (×0.3 penalty, BEFORE threshold)</li>
+      <li>Regime direction filter (BLOCK counter-trend, AFTER threshold)</li>
+      <li>Anti-trend EMA50 (×0.5 penalty, AFTER TP/SL)</li>
+      <li>Trailing stop capped at breakeven</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Self-Learning</h3>
+    <ul>
+      <li>Reviews every 10 closed trades (or 60s loop)</li>
+      <li>Tunable: entry_threshold 2.0–6.0</li>
+      <li>Tunable: wick_ratio 1.2–4.0</li>
+      <li>Tunable: risk_pct 5%–20%</li>
+      <li>RR ratio FIXED at 2.0 (removed from tunables)</li>
+      <li>One param change per cycle</li>
+      <li>Bound fallback: tries next param if stuck</li>
+      <li>5-loss forced review (10min throttle)</li>
+      <li>Per-entry-type performance tracking</li>
+    </ul>
+  </div>
+</div>
+
+</div>
+</body>
+</html>

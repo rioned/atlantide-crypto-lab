@@ -20,7 +20,7 @@ from app.state import (SYMBOLS, capital, capital_lock, state_lock,
                         reversal_pattern, open_trades, closed_trades,
                         event_log, sse_clients, sse_clients_lock,
                         param_history, param_version, param_lock,
-                        active_params,
+                        active_params, suspension_fingerprint,
                         perf_metrics, perf_lock,
                         last_hypothesis, last_hypothesis_lock,
                         self_learning_active)
@@ -188,6 +188,11 @@ def api_trades_csv():
 @app.route("/")
 def index():
     return render_template("dashboard.html")
+
+
+@app.route("/crypto-lab2-flow.html")
+def flow_diagram():
+    return app.send_static_file("crypto-lab2-flow.html")
 
 
 # ─── API Routes ───────────────────────────────────────────────────────────────
@@ -409,6 +414,7 @@ def api_reset():
                 open_trades[s].clear()
             closed_trades.clear()
             event_log.clear()
+            suspension_fingerprint[0] = 0
         msg = f"All accounts reset to ${INITIAL_CAPITAL_PER_SYMBOL:.0f} each"
 
     conn = get_db()

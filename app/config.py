@@ -4,7 +4,7 @@
 INITIAL_CAPITAL_PER_SYMBOL = 500.0
 RISK_PCT = 0.10               # Base 10% risk per trade (self-improving: risk_pct param)
 LEVERAGE = 5
-MAX_OPEN_TRADES_PER_SYMBOL = 2
+MAX_OPEN_TRADES_PER_SYMBOL = 1
 TRADING_FEE = 0.0005          # 0.05% per side (0.10% round-trip)
 
 # ─── Candles & Logging ─────────────────────────────────────────────────────
@@ -32,16 +32,20 @@ RSI_OVERSOLD = 30             # Base oversold threshold (adjusted by volatility)
 RSI_OVERBOUGHT = 70           # Base overbought threshold
 
 # ─── TP / SL ───────────────────────────────────────────────────────────────
-RR_RATIO = 2.0                # 1:2 risk-to-reward (self-improving: rr_ratio param)
-SL_ATR_MULTIPLIER = 1.0       # Stop-loss = ATR × this multiplier
+RR_RATIO = 2.0                # 1:2 risk-to-reward (fixed, not tunable)
+SL_ATR_MULTIPLIER = 1.5       # Stop-loss = ATR × this multiplier (was 1.0 — too tight on 15m)
 TP_ATR_MULTIPLIER = 2.0       # Take-profit = ATR × this multiplier
 
 # ─── Trade Cooldown ────────────────────────────────────────────────────────
 TRADE_COOLDOWN_MINUTES = 15   # Min minutes between trades on same symbol (prevents rapid re-entry)
 
+# ─── Consecutive Loss Pause ────────────────────────────────────────────────
+CONSECUTIVE_SL_LIMIT = 5      # N consecutive SLs triggers pause
+SL_PAUSE_SECONDS = 3600       # Pause duration in seconds (1h)
+
 # ─── Trailing Stop ─────────────────────────────────────────────────────────
 TRAILING_ACTIVATE_PCT = 0.50  # Activate trail when 50% of TP distance covered
-TRAILING_DISTANCE = 0.30      # Trail is 30% of TP distance behind price extreme
+TRAILING_DISTANCE = 0.50      # Trail is 50% of TP distance behind price extreme (was 30% — tighter caused gap-through losses)
 
 # ─── Regime Detection ──────────────────────────────────────────────────────
 TREND_EMA_PERIOD = 20         # EMA for trend direction

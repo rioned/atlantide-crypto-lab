@@ -347,15 +347,33 @@ def score_entry(sym, closed, ind):
     # Determine direction and best entry type
     direction = 1 if total_score > 0 else -1
     abs_total = abs(total_score)
-    
-    # Check if score meets threshold
-    if abs_total < entry_threshold:
-        return None
-    
-    # Find the highest-contributing pattern for display
+
+    # Signal direction validation: dominant pattern shouldn't contradict final direction
+    # e.g. HAMMER (bullish) should not produce a SHORT trade
     abs_contribs = [(abs(c["score"]), c) for c in contributions]
     abs_contribs.sort(key=lambda x: x[0], reverse=True)
     best_contrib = abs_contribs[0][1]
+    best_dir = 1 if best_contrib["score"] > 0 else -1
+    is_candle_pattern = best_contrib["type"] in ("HAMMER", "SHOOTING_STAR", "ENGULFING")
+    if is_candle_pattern and direction != best_dir:
+        # Major conflict: a candle pattern says one direction but total score says opposite.
+        # Likely means conflicting signals are muddling the score — penalize heavily.
+        total_score *= 0.3
+        direction = 1 if total_score > 0 else -1
+        abs_total = abs(total_score)
+
+    # Check if score meets threshold
+    if abs_total < entry_threshold:
+        return None
+
+    # ─── Regime/Vol Direction Filter ────────────────────────────────────────
+    # Downtrend + normal vol → only SHORT, ignore LONG signals
+    # Uptrend + normal vol → only LONG, ignore SHORT signals
+    if (trend == "downtrend" and vol_label == "normal" and direction == 1) or \
+       (trend == "uptrend" and vol_label == "normal" and direction == -1):
+        return None
+
+    # Find the highest-contributing pattern for display
     entry_type = best_contrib["type"]
     trigger = best_contrib["trigger"]
     
@@ -373,7 +391,7 @@ def score_entry(sym, closed, ind):
         a15 = 0.0001  # fallback
 
     # Get effective RR ratio (hot-reloadable by self-learning)
-    rr = get_effective_param("rr_ratio")
+    rr = RR_RATIO  # Fixed 1:2 — not tunable by self-learning
 
     # Calculate SL first from the actual entry level (close price).
     # TP is then derived from SL distance × RR_RATIO to guarantee 1:2 ratio.
@@ -410,7 +428,21 @@ def score_entry(sym, closed, ind):
     else:
         tp_price = entry_base - sl_distance * rr
     
-    # Build result
+    # Longer-term trend filter (EMA50 slope over ~2h)
+    # Prevents trading against the dominant 1h-equivalent direction
+    if len(closes) >= 58:  # 50 EMA + 8 slope lookback
+        ema50_vals = ema(closes, 50)
+        if len(ema50_vals) >= 8 and all(v is not None for v in ema50_vals[-8:]):
+            lt_price = closes[-1] if closes else 1
+            lt_slope = (ema50_vals[-1] - ema50_vals[-8]) / max(lt_price, 0.0001)
+            lt_trend = "bullish" if lt_slope > TREND_STRENGTH_MIN else \
+                       ("bearish" if lt_slope < -TREND_STRENGTH_MIN else "neutral")
+            if (direction == 1 and lt_trend == "bearish") or \
+               (direction == -1 and lt_trend == "bullish"):
+                # Anti-trend trade: halve the score
+                total_score *= 0.5
+                result["confidence_msg"] += \
+                    f" | ANTI-TREND (EMA50={lt_trend}) halved"
     result = {
         "score": round(total_score, 1),
         "direction": direction,
@@ -552,7 +584,7 @@ def strategy_loop():
         except Exception as e:
             log_event(f"Strategy error: {e}", "ERROR")
         # Dynamic sleep: a bit longer if no data yet
-        time.sleep(5)
+        time.sleep(1)
 
 
 # ─── Symbol Addition Helper ───────────────────────────────────────────────

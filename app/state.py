@@ -31,6 +31,16 @@ last_15m_time = {}        # s -> str | None
 open_trades = {}     # s -> [trade, ...]
 indicators = {}      # s -> {"daily_atr", "daily_atr_threshold", "5m_atr14"}
 last_trade_close_time = {}  # s -> float (time.time() of last trade close, for cooldown)
+consecutive_sl_losses = {}  # s -> int (consecutive SL losses counter)
+sl_pause_until = {}         # s -> float (time.time() when pause ends, 0 = not paused)
+
+# ─── Global 5-Loss Suspension ────────────────────────────────────────────────
+global_suspension_until = [0.0]  # float[0]: time.time() when suspension ends (0 = normal)
+global_suspension_lock = threading.Lock()
+# Fingerprint: trade count when suspension was triggered. Only re-check the
+# 5-loss condition when new trades have been added beyond this count.
+# Prevents infinite re-trigger loop on the same set of losing trades.
+suspension_fingerprint = [0]  # int[0]: len(closed_trades) at trigger time
 
 # ─── Global Lists ─────────────────────────────────────────────────────────────
 closed_trades = []
@@ -58,7 +68,7 @@ self_learning_active.set()   # enabled by default
 active_params = {
     "wick_ratio": None,       # HAMMER_MIN_WICK_RATIO override
     "entry_threshold": None,  # ENTRY_THRESHOLD override
-    "rr_ratio": None,         # RR_RATIO override
+    "rr_ratio": None,         # RR_RATIO override (reset to default 2.0)
     "risk_pct": None,         # RISK_PCT override
 }
 
@@ -121,13 +131,16 @@ def init_symbol_state(sym):
         indicators[sym] = {"daily_atr": 0.0, "daily_atr_threshold": 0.0,
                           "15m_atr14": 0.0}
         last_trade_close_time[sym] = 0.0
+        consecutive_sl_losses[sym] = 0
+        sl_pause_until[sym] = 0.0
 
 
 def remove_symbol_state(sym):
     """Remove all state entries for a symbol."""
     for d in [candles, ticker, signal_state, daily_atr, daily_atr_threshold,
               manipulation_candle, manipulation_active, reversal_pattern,
-              last_15m_time, open_trades, indicators, last_trade_close_time]:
+              last_15m_time, open_trades, indicators, last_trade_close_time,
+              consecutive_sl_losses, sl_pause_until]:
         d.pop(sym, None)
     with capital_lock:
         capital.pop(sym, None)

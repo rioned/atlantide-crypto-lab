@@ -55,15 +55,6 @@ TUNABLE_PARAMS = [
         "direction": 1,
     },
     {
-        "name": "rr_ratio",
-        "config_ref": "RR_RATIO",
-        "default": RR_RATIO,
-        "min": 1.5,
-        "max": 3.5,
-        "description": "Risk-to-reward ratio (1:X)",
-        "direction": -1,
-    },
-    {
         "name": "risk_pct",
         "config_ref": "RISK_PCT",
         "default": RISK_PCT,
@@ -276,9 +267,9 @@ def _select_param_to_tune(metrics):
     if win_rate < TARGET_WINRATE * 0.7 and profit_factor < 1.0:
         return TUNABLE_PARAMS[0]  # entry_threshold
     
-    # Good win rate but small wins → increase RR
+    # Good win rate but small wins → increase risk per trade
     if win_rate >= TARGET_WINRATE and profit_factor < 1.5:
-        return TUNABLE_PARAMS[2]  # rr_ratio
+        return TUNABLE_PARAMS[2]  # risk_pct
     
     # Decent win rate but overall negative → tighten wick ratio
     if win_rate < TARGET_WINRATE * 0.8 and profit_factor < 1.0:
@@ -344,13 +335,6 @@ def _select_tune_direction(param, metrics, trades):
             return "decrease"
         return "increase"
 
-    # rr_ratio
-    if param["name"] == "rr_ratio":
-        if win_rate >= TARGET_WINRATE:
-            return "increase"
-        else:
-            return "decrease"
-
     # risk_pct
     if param["name"] == "risk_pct":
         if win_rate >= TARGET_WINRATE:
@@ -391,7 +375,11 @@ def _form_hypothesis(param, direction, metrics, trades):
 
 
 def _apply_param_change(param, direction):
-    """Apply parameter change to active_params (hot-reloadable by strategy)."""
+    """Apply parameter change to active_params (hot-reloadable by strategy).
+    
+    Returns (old_val, new_val, changed) where changed=False means the
+    param was already at its bound and couldn't change further.
+    """
     current_default = param["default"]
     current_override = active_params.get(param["name"])
     current = current_override if current_override is not None else current_default
@@ -403,10 +391,12 @@ def _apply_param_change(param, direction):
         new_val = max(param["min"], current - abs(change_amount))
 
     old_val = current
-    with param_lock:
-        active_params[param["name"]] = new_val
+    changed = abs(new_val - old_val) > 1e-10
+    if changed:
+        with param_lock:
+            active_params[param["name"]] = new_val
 
-    return old_val, new_val
+    return old_val, new_val, changed
 
 
 def _compute_goals(metrics):
@@ -474,7 +464,21 @@ def _run_review_cycle(force=False):
 
     param_to_tune = _select_param_to_tune(metrics)
     direction = _select_tune_direction(param_to_tune, metrics, after_trades)
-    old_val, new_val = _apply_param_change(param_to_tune, direction)
+    old_val, new_val, changed = _apply_param_change(param_to_tune, direction)
+    
+    # If param was stuck at bound, try the next param
+    if not changed:
+        for fallback in TUNABLE_PARAMS:
+            if fallback["name"] == param_to_tune["name"]:
+                continue
+            fb_direction = _select_tune_direction(fallback, metrics, after_trades)
+            fb_old, fb_new, fb_changed = _apply_param_change(fallback, fb_direction)
+            if fb_changed:
+                param_to_tune = fallback
+                direction = fb_direction
+                old_val, new_val, changed = fb_old, fb_new, fb_changed
+                break
+    
     hypothesis = _form_hypothesis(param_to_tune, direction, metrics, after_trades)
 
     with last_hypothesis_lock:
@@ -549,13 +553,19 @@ def _save_trade_score_for_trade(trade, sym):
         score = _score_trade(trade)
 
         # Check for 5 consecutive losses -> trigger immediate self-improvement
+        # Throttled: max once per 10 minutes to prevent rapid-fire no-op changes
         if len(all_closed) >= 5:
             last_5 = all_closed[-5:]
             if all(t["pnl"] < 0 for t in last_5):
-                log_event(
-                    "[SELF-LEARN] 5 consecutive losses detected — "
-                    "triggering immediate review!", "WARN")
-                _run_review_cycle(force=True)
+                # Check time since last forced review
+                now = time.time()
+                last_force = getattr(_save_trade_score_for_trade, "_last_force_time", 0)
+                if now - last_force > 600:  # 10 minutes
+                    _save_trade_score_for_trade._last_force_time = now
+                    log_event(
+                        "[SELF-LEARN] 5 consecutive losses detected — "
+                        "triggering immediate review!", "WARN")
+                    _run_review_cycle(force=True)
 
         trade_score = {
             "trade_id": trade["id"],

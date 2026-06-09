@@ -7,11 +7,16 @@ from app.config import (RISK_PCT, LEVERAGE, MAX_OPEN_TRADES_PER_SYMBOL,
                          MAX_CLOSED_TRADES, TRADING_FEE,
                          TRAILING_ACTIVATE_PCT, TRAILING_DISTANCE,
                          SL_ATR_MULTIPLIER, TP_ATR_MULTIPLIER,
-                         TRADE_COOLDOWN_MINUTES)
+                         RR_RATIO,
+                         TRADE_COOLDOWN_MINUTES,
+                         CONSECUTIVE_SL_LIMIT, SL_PAUSE_SECONDS)
 from app.state import (SYMBOLS, capital, capital_lock, state_lock,
                         signal_state, ticker, open_trades, closed_trades,
                         TRADE_ID_COUNTER, TRADE_ID_LOCK, indicators,
-                        last_trade_close_time)
+                        last_trade_close_time,
+                        consecutive_sl_losses, sl_pause_until,
+                        global_suspension_until, global_suspension_lock,
+                        suspension_fingerprint)
 from app.database import save_closed_trade, save_state
 from app.strategy import log_event
 from app.self_learning import _save_trade_score_for_trade
@@ -54,7 +59,7 @@ def execution_loop():
     last_save = time.time()
     while True:
         try:
-            time.sleep(5)
+            time.sleep(1)
             changed = False
             syms = list(SYMBOLS)
 
@@ -114,8 +119,12 @@ def execution_loop():
                         trail_distance = tp_distance * TRAILING_DISTANCE
                         if trade["direction"] == 1:
                             new_sl = trade["highest_price"] - trail_distance
+                            # Cap at breakeven — never let trailing SL go below entry
+                            new_sl = max(new_sl, trade["entry"])
                         else:
                             new_sl = trade["highest_price"] + trail_distance
+                            # Cap at breakeven — never let trailing SL go above entry
+                            new_sl = min(new_sl, trade["entry"])
                         new_sl = round(new_sl, 8)
                         if (trade["direction"] == 1 and new_sl > trade["sl"]) or \
                            (trade["direction"] == -1 and new_sl < trade["sl"]):
@@ -134,15 +143,37 @@ def execution_loop():
                             close_reason = "SL"
 
                     # Override SL → TRAILING when trailing stop closed a profitable trade
+                    # BUT only if the actual PnL is positive (not gapped past SL into loss)
                     if close_reason == "SL" and trade.get("trailing_active") and trade.get("highest_price"):
-                        # For LONG: trailing SL was above entry → price retraced but still profitable
-                        # For SHORT: trailing SL was below entry → price rallied but still profitable
                         trailing_profited = (
                             (trade["direction"] == 1 and trade["highest_price"] > trade["entry"]) or
                             (trade["direction"] == -1 and trade["highest_price"] < trade["entry"])
                         )
-                        if trailing_profited:
+                        # Also verify the close is at a profitable level — prevents
+                        # "TRAILING" label on trades that gapped past SL into loss
+                        # LONG: profitable when current_price > entry (price went up)
+                        # SHORT: profitable when current_price < entry (price went down)
+                        pnl_profitable = (
+                            (trade["direction"] == 1 and current_price > trade["entry"]) or
+                            (trade["direction"] == -1 and current_price < trade["entry"])
+                        )
+                        if trailing_profited and pnl_profitable:
                             close_reason = "TRAILING"
+
+                    # ── Consecutive SL Tracking ──────────────────────────────────
+                    if close_reason == "SL":
+                        consecutive_sl_losses[sym] = consecutive_sl_losses.get(sym, 0) + 1
+                        if consecutive_sl_losses[sym] >= CONSECUTIVE_SL_LIMIT:
+                            sl_pause_until[sym] = time.time() + SL_PAUSE_SECONDS
+                            log_event(
+                                f"[{sym}] PAUSED 1h after {consecutive_sl_losses[sym]} consecutive SLs",
+                                "WARN")
+                    elif close_reason in ("TP", "TRAILING"):
+                        if consecutive_sl_losses.get(sym, 0) > 0:
+                            consecutive_sl_losses[sym] = 0
+                            log_event(
+                                f"[{sym}] Consecutive SL counter reset ({close_reason})",
+                                "INFO")
 
                     if close_reason:
                         trade["exit_price"] = current_price
@@ -233,6 +264,85 @@ def execution_loop():
                 if time_since_close < cooldown_secs:
                     continue
 
+                # Consecutive SL pause: check if symbol is in cooldown
+                pause_end = sl_pause_until.get(sym, 0)
+                if pause_end > time.time():
+                    continue
+
+                # ── Open Positions Loss Filter ──────────────────────────────
+                # If 50%+ of all open positions have negative unrealized PnL,
+                # skip opening new trades to avoid stacking losses
+                all_syms = list(SYMBOLS)
+                total_open_positions = 0
+                losing_positions = 0
+                for s in all_syms:
+                    with state_lock:
+                        trades_s = list(open_trades.get(s, []))
+                    for t in trades_s:
+                        total_open_positions += 1
+                        if t.get("unrealized_pnl", 0) < 0:
+                            losing_positions += 1
+                if total_open_positions >= 1 and losing_positions > 0:
+                    log_event(
+                        f"[{sym}] SKIP OPEN: {losing_positions}/{total_open_positions} "
+                        f"open positions in loss (all must be profitable)", "WARN")
+                    continue
+
+                # ── Global 5-Loss Suspension ────────────────────────────────
+                # If the last 5 closed trades are ALL losses, suspend new
+                # entries for 2h. Existing open positions still resolve.
+                #
+                # Uses a TRADE-COUNT FINGERPRINT to prevent infinite re-trigger
+                # loop: records len(closed_trades) when suspension fires, and
+                # only re-evaluates the 5-loss condition when new trades have
+                # been added beyond that count. This cleanly separates old loss
+                # runs from new ones — once the fingerprint is set, the same
+                # set of trades cannot trigger another suspension.
+                with state_lock:
+                    all_closed = list(closed_trades)
+                    closed_count = len(all_closed)
+
+                with global_suspension_lock:
+                    guard = global_suspension_until[0]
+                    fp = suspension_fingerprint[0]
+
+                # Only check the 5-loss condition when new trades have been
+                # added since the last suspension trigger (fingerprint guard).
+                if closed_count > fp and closed_count >= 3:
+                    last_n = all_closed[-3:]
+                    all_loss = all(t.get("pnl", 0) < 0 for t in last_n)
+                    if all_loss:
+                        with global_suspension_lock:
+                            # Guard values <= 0 mean "not suspended"
+                            if global_suspension_until[0] <= 0.0:
+                                global_suspension_until[0] = time.time() + 3600
+                                suspension_fingerprint[0] = closed_count
+                                log_event(
+                                    f"[{sym}] 3-LOSS SUSPENSION: last 3 trades all negative "
+                                    f"PnL — new trades suspended for 1h "
+                                    f"(fingerprint={closed_count})", "WARN")
+                                guard = global_suspension_until[0]
+                                fp = suspension_fingerprint[0]
+
+                # Check if suspension is active
+                if guard > time.time():
+                    remain = int(guard - time.time())
+                    log_event(
+                        f"[{sym}] SKIP OPEN: global suspension active "
+                        f"({remain//3600}h {(remain%3600)//60}m remaining)", "WARN")
+                    continue
+                elif guard > 0:
+                    # Suspension expired — clear guard (back to 0.0).
+                    # Fingerprint remains set, so the same trade set won't
+                    # re-trigger even though guard==0.0.
+                    with global_suspension_lock:
+                        if global_suspension_until[0] > 0 and \
+                           global_suspension_until[0] <= time.time():
+                            global_suspension_until[0] = 0.0
+                            log_event(
+                                f"[{sym}] Global suspension expired — "
+                                f"resuming trades (fingerprint={fp})", "INFO")
+
                 if (current_sig in ("LONG", "SHORT") and
                         current_sig != last_entry and
                         num_open < MAX_OPEN_TRADES_PER_SYMBOL):
@@ -247,8 +357,7 @@ def execution_loop():
                     # but the actual entry is at the live price — if price moved since
                     # the candle closed, the SL could be paper-thin or even on the wrong side.
                     # TP is derived from SL distance × RR_RATIO to guarantee 1:2 ratio.
-                    from app.self_learning import get_effective_param
-                    rr = get_effective_param("rr_ratio")
+                    rr = RR_RATIO  # Fixed 1:2 — not tunable by self-learning
                     a15 = indicators.get(sym, {}).get("15m_atr14", 0)
                     if a15 <= 0:
                         a15 = 0.0001
@@ -265,6 +374,17 @@ def execution_loop():
                     conf_mult = _confidence_multiplier(sym)
                     if conf_mult <= 0:
                         continue
+
+                    # Volatility-based risk adjustment
+                    with state_lock:
+                        vol_label = signal_state[sym].get("vol_label", "normal")
+                    if vol_label == "high":
+                        vol_mult = 0.5  # Halve risk in high volatility
+                    elif vol_label == "low":
+                        vol_mult = 1.2  # Slightly increase in low vol
+                    else:
+                        vol_mult = 1.0
+                    conf_mult *= vol_mult
 
                     with capital_lock:
                         sym_cap = capital.get(sym)
@@ -355,4 +475,4 @@ def execution_loop():
 
         except Exception as e:
             log_event(f"Execution error: {e}", "ERROR")
-            time.sleep(5)
+            time.sleep(1)

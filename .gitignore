@@ -7,3 +7,4 @@ venv/
 *.db-journal
 *.bak
 store/
+atlantide.db*

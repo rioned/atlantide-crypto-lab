@@ -15,6 +15,8 @@ from app.state import (SYMBOLS, capital, capital_lock, state_lock,
                         closed_trades, event_log, open_trades,
                         TRADE_ID_COUNTER, TRADE_ID_LOCK,
                         param_history, param_version, param_lock,
+                        global_suspension_until, global_suspension_lock,
+                        suspension_fingerprint,
                         init_symbol_state, ensure_capital)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -237,6 +239,13 @@ def save_state():
             tic = TRADE_ID_COUNTER
         conn.execute("INSERT OR REPLACE INTO symbol_config (key, value) "
                      "VALUES (?, ?)", ("trade_id_counter", str(tic)))
+        with global_suspension_lock:
+            gsu = str(global_suspension_until[0])
+        conn.execute("INSERT OR REPLACE INTO symbol_config (key, value) "
+                     "VALUES (?, ?)", ("global_suspension_until", gsu))
+        conn.execute("INSERT OR REPLACE INTO symbol_config (key, value) "
+                     "VALUES (?, ?)",
+                     ("suspension_fingerprint", str(suspension_fingerprint[0])))
         conn.execute("DELETE FROM open_trades")
         for sym in SYMBOLS:
             for t in open_trades[sym]:
@@ -354,6 +363,17 @@ def load_state():
             elif row["key"] == "trade_id_counter":
                 with TRADE_ID_LOCK:
                     TRADE_ID_COUNTER = int(row["value"])
+            elif row["key"] == "global_suspension_until":
+                try:
+                    with global_suspension_lock:
+                        global_suspension_until[0] = float(row["value"])
+                except ValueError:
+                    pass
+            elif row["key"] == "suspension_fingerprint":
+                try:
+                    suspension_fingerprint[0] = int(row["value"])
+                except ValueError:
+                    pass
 
         # Load per-symbol capital
         rows = conn.execute("SELECT * FROM symbol_capital").fetchall()
