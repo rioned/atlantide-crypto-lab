@@ -14,26 +14,26 @@ MAX_CLOSED_TRADES = 500
 
 # ─── Entry Type Weights (Scoring System) ───────────────────────────────────
 # Max score range: -8.0 to +8.0. Entry when abs(score) >= ENTRY_THRESHOLD
-ENTRY_THRESHOLD = 3.5         # Adaptive via self-learning threshold param
+ENTRY_THRESHOLD = 3.5         # Adaptive via self-learning threshold param (was 4.0 — too high, blocked all signals in low-volatility range)
 
 HAMMER_WEIGHT = 2.5           # Bullish hammer pattern (high confidence reversal)
 SHOOTING_STAR_WEIGHT = -2.5   # Bearish shooting star (high confidence reversal)
 ENGULFING_WEIGHT = 2.0        # Bullish engulfing; bearish = -2.0
 EMA_CROSS_WEIGHT = 2.0        # EMA9/21 crossover (fresh cross = full weight)
 EMA_POSITION_WEIGHT = 1.0     # EMA9 > EMA21 = +1.0
-RSI_WEIGHT = 1.5              # Oversold/overbought with zone weighting
-MACD_WEIGHT = 1.0             # MACD histogram sign
-VOLUME_WEIGHT = 0.5           # Volume vs SMA20, takes sign of running score
+RSI_WEIGHT = 1.0              # Oversold/overbought with zone weighting (was 1.5 — too easy for pure-indicator entries to cross threshold)
+MACD_WEIGHT = 0.5             # MACD histogram sign (was 1.0 — pure-indicator entries mixed with RSI crossed threshold too easily)
+VOLUME_WEIGHT = 0.3           # Volume vs SMA20, takes sign of running score (was 0.5 — confirmatory at best, shouldn't push marginal entries over threshold)
 
 # ─── Pattern Detection ─────────────────────────────────────────────────────
 HAMMER_MIN_WICK_RATIO = 1.5   # Wick must be >= 1.5x body (tuned as wick_ratio)
-ENGULFING_MIN_BODY_RATIO = 1.3 # Engulfing body must be >= 1.3x previous body
-RSI_OVERSOLD = 30             # Base oversold threshold (adjusted by volatility)
-RSI_OVERBOUGHT = 70           # Base overbought threshold
+ENGULFING_MIN_BODY_RATIO = 1.5 # Engulfing body must be >= 1.5x previous body (was 1.3 — too permissive, all engulfing LONG trades lost)
+RSI_OVERSOLD = 25             # Base oversold threshold (was 30 — too loose, weak signals entered)
+RSI_OVERBOUGHT = 75           # Base overbought threshold (was 70 — too loose, weak signals entered)
 
 # ─── TP / SL ───────────────────────────────────────────────────────────────
-RR_RATIO = 2.0                # 1:2 risk-to-reward (fixed, not tunable)
-SL_ATR_MULTIPLIER = 1.5       # Stop-loss = ATR × this multiplier (was 1.0 — too tight on 15m)
+RR_RATIO = 1.5                # 1:1.5 risk-to-reward (was 2.0 — TP too far, only 5% hit rate)
+SL_ATR_MULTIPLIER = 2.0       # Stop-loss = ATR × this multiplier (was 1.5 — too tight, 67% of trades hit SL)
 TP_ATR_MULTIPLIER = 2.0       # Take-profit = ATR × this multiplier
 
 # ─── Trade Cooldown ────────────────────────────────────────────────────────
@@ -44,8 +44,8 @@ CONSECUTIVE_SL_LIMIT = 5      # N consecutive SLs triggers pause
 SL_PAUSE_SECONDS = 3600       # Pause duration in seconds (1h)
 
 # ─── Trailing Stop ─────────────────────────────────────────────────────────
-TRAILING_ACTIVATE_PCT = 0.50  # Activate trail when 50% of TP distance covered
-TRAILING_DISTANCE = 0.50      # Trail is 50% of TP distance behind price extreme (was 30% — tighter caused gap-through losses)
+TRAILING_ACTIVATE_PCT = 0.35  # Activate trail when 35% of TP distance covered (was 50% — too late, missed profit locks)
+TRAILING_DISTANCE = 0.35      # Trail is 35% of TP distance behind price extreme (was 50% — too loose, gave back profits)
 
 # ─── Regime Detection ──────────────────────────────────────────────────────
 TREND_EMA_PERIOD = 20         # EMA for trend direction
@@ -60,7 +60,7 @@ TARGET_MONTHLY_RETURN = 10.0
 MAX_DRAWDOWN_LIMIT = 20.0
 SELF_LEARN_MIN_TRADES = 10
 SELF_LEARN_REVIEW_INTERVAL = 10
-PARAM_TUNE_AMOUNT = 0.10
+PARAM_TUNE_AMOUNT = 0.05       # 5% change per cycle (was 10% — too aggressive, overshoots optimal)
 
 # ─── Entry Types (for per-type tracking) ───────────────────────────────────
 ENTRY_TYPES = [

@@ -257,6 +257,24 @@ def _select_param_to_tune(metrics):
     profit_factor = metrics.get("profit_factor", 0.0)
     type_perf = metrics.get("type_performance", {})
 
+    # OSCILLATION GUARD: if we've changed entry_threshold 3+ consecutive
+    # times with no win rate improvement (still <= 5%), force a different
+    # parameter to break the feedback loop.
+    consecutive_same = 0
+    for entry in reversed(param_history):
+        p = entry.get("param_changed", "")
+        if p == "entry_threshold":
+            consecutive_same += 1
+        else:
+            break
+    if consecutive_same >= 3:
+        wr_after_last = param_history[-1].get("win_rate_after", 0) if param_history else 0
+        if wr_after_last <= 5.0:
+            # entry_threshold changes aren't helping — try a different param
+            for fallback in TUNABLE_PARAMS:
+                if fallback["name"] != "entry_threshold":
+                    return fallback
+
     # Check if any entry type is severely underperforming
     for entry_type, perf in type_perf.items():
         if perf["count"] >= 5 and perf["win_rate"] < 25.0:

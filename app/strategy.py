@@ -145,7 +145,16 @@ def compute_indicators(sym, closed):
         result["trend"] = "uptrend" if slope > 0 else "downtrend"
     else:
         result["trend"] = "ranging"
-    
+
+    # Price-vs-EMA20 cross-check: if close is on the wrong side of EMA,
+    # the EMA20 slope is lagging — downgrade to "ranging" so the regime
+    # filter doesn't block the correct direction.
+    if result.get("ema20", 0) > 0 and closes[-1] > 0:
+        if result["trend"] == "uptrend" and closes[-1] < result["ema20"]:
+            result["trend"] = "ranging"
+        elif result["trend"] == "downtrend" and closes[-1] > result["ema20"]:
+            result["trend"] = "ranging"
+
     # Volatility
     vol_label, cur_atr, vol_pct = classify_volatility(highs, lows, closes, 14, 50)
     result["vol_label"] = vol_label
@@ -188,16 +197,34 @@ def score_entry(sym, closed, ind):
     
     # Track how many entry types fire and their contributions
     contributions = []
-    
+
+    # Check preceding trend context for reversal patterns.
+    # HAMMER should only fire after a downtrend, SHOOTING_STAR after an uptrend.
+    # Use a slope check over last 4 closes (not strict consecutiveness).
+    def _preceding_downtrend(closes, lookback=4):
+        """Returns True if the last `lookback` closes show a downward slope."""
+        if len(closes) < lookback + 1:
+            return False
+        prev = closes[-(lookback+1):-1]
+        # Simple check: first close > last close = downward movement
+        return prev[0] > prev[-1]
+
+    def _preceding_uptrend(closes, lookback=4):
+        """Returns True if the last `lookback` closes show an upward slope."""
+        if len(closes) < lookback + 1:
+            return False
+        prev = closes[-(lookback+1):-1]
+        return prev[0] < prev[-1]
+
     # --- 1. Candlestick Patterns (highest confidence) ---
     for i in range(min(3, len(closed))):
         candle = closed[-(i + 1)]
         if detect_doji(candle):
             continue
         
-        # Hammer → LONG
+        # Hammer → LONG (only if preceding downtrend — reversal pattern)
         is_ham, ham_dir = detect_hammer(candle, wick_ratio)
-        if is_ham:
+        if is_ham and _preceding_downtrend(closes, lookback=3):
             contributions.append({
                 "type": "HAMMER", "score": HAMMER_WEIGHT,
                 "direction": 1, "trigger": candle["high"],
@@ -205,9 +232,9 @@ def score_entry(sym, closed, ind):
             })
             break
         
-        # Shooting Star → SHORT
+        # Shooting Star → SHORT (only if preceding uptrend — reversal pattern)
         is_star, star_dir = detect_shooting_star(candle, wick_ratio)
-        if is_star:
+        if is_star and _preceding_uptrend(closes, lookback=3):
             contributions.append({
                 "type": "SHOOTING_STAR", "score": SHOOTING_STAR_WEIGHT,
                 "direction": -1, "trigger": candle["low"],
@@ -369,6 +396,8 @@ def score_entry(sym, closed, ind):
     # ─── Regime/Vol Direction Filter ────────────────────────────────────────
     # Downtrend + normal vol → only SHORT, ignore LONG signals
     # Uptrend + normal vol → only LONG, ignore SHORT signals
+    # In high/low volatility, the short-term EMA20 trend is unreliable,
+    # so don't filter — let the EMA50 anti-trend filter handle it.
     if (trend == "downtrend" and vol_label == "normal" and direction == 1) or \
        (trend == "uptrend" and vol_label == "normal" and direction == -1):
         return None
@@ -429,7 +458,10 @@ def score_entry(sym, closed, ind):
         tp_price = entry_base - sl_distance * rr
     
     # Longer-term trend filter (EMA50 slope over ~2h)
-    # Prevents trading against the dominant 1h-equivalent direction
+    # BLOCKS trades against the dominant trend entirely.
+    # The old behaviour halved the score AFTER threshold check,
+    # rendering the filter completely ineffective — trades passed
+    # through with only a position-sizing penalty.
     if len(closes) >= 58:  # 50 EMA + 8 slope lookback
         ema50_vals = ema(closes, 50)
         if len(ema50_vals) >= 8 and all(v is not None for v in ema50_vals[-8:]):
@@ -439,10 +471,8 @@ def score_entry(sym, closed, ind):
                        ("bearish" if lt_slope < -TREND_STRENGTH_MIN else "neutral")
             if (direction == 1 and lt_trend == "bearish") or \
                (direction == -1 and lt_trend == "bullish"):
-                # Anti-trend trade: halve the score
-                total_score *= 0.5
-                result["confidence_msg"] += \
-                    f" | ANTI-TREND (EMA50={lt_trend}) halved"
+                # Anti-trend trade: BLOCK entirely
+                return None
     result = {
         "score": round(total_score, 1),
         "direction": direction,

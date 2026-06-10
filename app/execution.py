@@ -271,7 +271,9 @@ def execution_loop():
 
                 # ── Open Positions Loss Filter ──────────────────────────────
                 # If 50%+ of all open positions have negative unrealized PnL,
-                # skip opening new trades to avoid stacking losses
+                # skip opening new trades to avoid stacking losses.
+                # Requires at least 2 open positions — a single trade in loss
+                # is normal price noise and shouldn't freeze the system.
                 all_syms = list(SYMBOLS)
                 total_open_positions = 0
                 losing_positions = 0
@@ -282,10 +284,10 @@ def execution_loop():
                         total_open_positions += 1
                         if t.get("unrealized_pnl", 0) < 0:
                             losing_positions += 1
-                if total_open_positions >= 1 and losing_positions > 0:
+                if total_open_positions >= 2 and losing_positions > total_open_positions * 0.5:
                     log_event(
                         f"[{sym}] SKIP OPEN: {losing_positions}/{total_open_positions} "
-                        f"open positions in loss (all must be profitable)", "WARN")
+                        f"open positions in loss (≥50% threshold)", "WARN")
                     continue
 
                 # ── Global 5-Loss Suspension ────────────────────────────────
@@ -315,11 +317,11 @@ def execution_loop():
                         with global_suspension_lock:
                             # Guard values <= 0 mean "not suspended"
                             if global_suspension_until[0] <= 0.0:
-                                global_suspension_until[0] = time.time() + 3600
+                                global_suspension_until[0] = time.time() + 10800
                                 suspension_fingerprint[0] = closed_count
                                 log_event(
                                     f"[{sym}] 3-LOSS SUSPENSION: last 3 trades all negative "
-                                    f"PnL — new trades suspended for 1h "
+                                    f"PnL — new trades suspended for 3h "
                                     f"(fingerprint={closed_count})", "WARN")
                                 guard = global_suspension_until[0]
                                 fp = suspension_fingerprint[0]
@@ -333,15 +335,18 @@ def execution_loop():
                     continue
                 elif guard > 0:
                     # Suspension expired — clear guard (back to 0.0).
-                    # Fingerprint remains set, so the same trade set won't
-                    # re-trigger even though guard==0.0.
+                    # ALSO advance fingerprint past current trade count so the
+                    # same set of trades cannot re-trigger immediately. Trades
+                    # that closed during the suspension increased closed_count,
+                    # making closed_count > old_fp → false alarm re-trigger.
                     with global_suspension_lock:
                         if global_suspension_until[0] > 0 and \
                            global_suspension_until[0] <= time.time():
                             global_suspension_until[0] = 0.0
+                            suspension_fingerprint[0] = closed_count
                             log_event(
                                 f"[{sym}] Global suspension expired — "
-                                f"resuming trades (fingerprint={fp})", "INFO")
+                                f"resuming trades (fingerprint={closed_count})", "INFO")
 
                 if (current_sig in ("LONG", "SHORT") and
                         current_sig != last_entry and

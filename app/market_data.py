@@ -70,9 +70,9 @@ def bootstrap_historical_candles(sym):
 def bootstrap_all():
     """Bootstrap all symbols in parallel — much faster than sequential."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    with ThreadPoolExecutor(max_workers=8) as ex:
         futs = {ex.submit(bootstrap_historical_candles, sym): sym for sym in SYMBOLS}
-        for f in as_completed(futs, timeout=30):
+        for f in as_completed(futs, timeout=180):
             try:
                 f.result()
             except Exception as e:
