@@ -6,6 +6,7 @@ from datetime import datetime
 from app.config import (RISK_PCT, LEVERAGE, MAX_OPEN_TRADES_PER_SYMBOL,
                          MAX_CLOSED_TRADES, TRADING_FEE,
                          TRAILING_ACTIVATE_PCT, TRAILING_DISTANCE,
+                         TRAILING_PULLBACK_PCT,
                          SL_ATR_MULTIPLIER, TP_ATR_MULTIPLIER,
                          RR_RATIO,
                          TRADE_COOLDOWN_MINUTES,
@@ -93,6 +94,7 @@ def execution_loop():
                     # Trailing stop logic
                     trade.setdefault("highest_price", trade["entry"])
                     trade.setdefault("trailing_active", False)
+                    trade.setdefault("peak_pnl", 0.0)
 
                     # Track price extremes
                     if trade["direction"] == 1:
@@ -126,9 +128,26 @@ def execution_loop():
                             # Cap at breakeven — never let trailing SL go above entry
                             new_sl = min(new_sl, trade["entry"])
                         new_sl = round(new_sl, 8)
-                        if (trade["direction"] == 1 and new_sl > trade["sl"]) or \
-                           (trade["direction"] == -1 and new_sl < trade["sl"]):
-                            trade["sl"] = new_sl
+                        if (trade['direction'] == 1 and new_sl > trade['sl']) or \
+                           (trade['direction'] == -1 and new_sl < trade['sl']):
+                            trade['sl'] = new_sl
+
+                    # ── PnL Pullback Lock ────────────────────────────────────
+                    # After trailing activates, track peak unrealized PnL.
+                    # If profit drops TRAILING_PULLBACK_PCT (10%) from peak,
+                    # close early to lock in gains rather than riding back to SL.
+                    unrealized = trade.get('unrealized_pnl', 0)
+                    if trade['trailing_active'] and unrealized > trade['peak_pnl']:
+                        trade['peak_pnl'] = unrealized
+                    if trade['trailing_active'] and trade['peak_pnl'] > 0:
+                        pullback = (trade['peak_pnl'] - unrealized) / trade['peak_pnl']
+                        if pullback >= TRAILING_PULLBACK_PCT:
+                            close_reason = 'PULLBACK'
+                            log_event(
+                                f"[{sym}] PULLBACK: trade {trade['id']} "
+                                f"locked ${trade['peak_pnl']:.2f} → ${unrealized:.2f} "
+                                f'({pullback*100:.0f}% drop from peak)',
+                                'TRADE')
 
                     # TP / SL check (now uses potentially updated trailing SL)
                     if trade["direction"] == 1:
@@ -168,7 +187,7 @@ def execution_loop():
                             log_event(
                                 f"[{sym}] PAUSED 1h after {consecutive_sl_losses[sym]} consecutive SLs",
                                 "WARN")
-                    elif close_reason in ("TP", "TRAILING"):
+                    elif close_reason in ("TP", "TRAILING", "PULLBACK"):
                         if consecutive_sl_losses.get(sym, 0) > 0:
                             consecutive_sl_losses[sym] = 0
                             log_event(
@@ -446,6 +465,7 @@ def execution_loop():
                         "confidence_mult": conf_mult,
                         "highest_price": current_price,
                         "trailing_active": False,
+                        "peak_pnl": 0.0,
                     }
                     with state_lock:
                         open_trades[sym].append(trade)

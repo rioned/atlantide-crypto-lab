@@ -14,7 +14,7 @@ MAX_CLOSED_TRADES = 500
 
 # ─── Entry Type Weights (Scoring System) ───────────────────────────────────
 # Max score range: -8.0 to +8.0. Entry when abs(score) >= ENTRY_THRESHOLD
-ENTRY_THRESHOLD = 3.5         # Adaptive via self-learning threshold param (was 4.0 — too high, blocked all signals in low-volatility range)
+ENTRY_THRESHOLD = 4.0         # Adaptive via self-learning threshold param (was 3.5 — increased for stricter entry criteria)
 
 HAMMER_WEIGHT = 2.5           # Bullish hammer pattern (high confidence reversal)
 SHOOTING_STAR_WEIGHT = -2.5   # Bearish shooting star (high confidence reversal)
@@ -46,6 +46,7 @@ SL_PAUSE_SECONDS = 3600       # Pause duration in seconds (1h)
 # ─── Trailing Stop ─────────────────────────────────────────────────────────
 TRAILING_ACTIVATE_PCT = 0.35  # Activate trail when 35% of TP distance covered (was 50% — too late, missed profit locks)
 TRAILING_DISTANCE = 0.35      # Trail is 35% of TP distance behind price extreme (was 50% — too loose, gave back profits)
+TRAILING_PULLBACK_PCT = 0.10 # Close trade if profit drops 10% from peak after trailing activates (lock in gains)
 
 # ─── Regime Detection ──────────────────────────────────────────────────────
 TREND_EMA_PERIOD = 20         # EMA for trend direction
